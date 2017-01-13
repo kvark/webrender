@@ -7,6 +7,7 @@ use channel::{self, MsgSender, PayloadHelperMethods, PayloadSender};
 use offscreen_gl_context::{GLContextAttributes, GLLimits};
 use std::cell::Cell;
 use {ApiMsg, ColorF, DisplayListBuilder, Epoch};
+use {GeometryData, GeometryKey};
 use {FontKey, IdNamespace, ImageFormat, ImageKey, NativeFontHandle, PipelineId};
 use {RenderApiSender, ResourceId, ScrollEventPhase, ScrollLayerState, ScrollLocation, ServoScrollRootId};
 use {GlyphKey, GlyphDimensions, ImageData, WebGLContextId, WebGLCommand};
@@ -82,7 +83,9 @@ impl RenderApi {
         rx.recv().unwrap()
     }
 
-    /// Creates an `ImageKey`.
+    /// Creates an `ImageKey` without associated storage.
+    ///
+    /// This is useful for external images not owned by WebRender, including WebGL.
     pub fn alloc_image(&self) -> ImageKey {
         let new_id = self.next_unique_id();
         ImageKey::new(new_id.0, new_id.1)
@@ -118,6 +121,20 @@ impl RenderApi {
     /// Deletes the specific image.
     pub fn delete_image(&self, key: ImageKey) {
         let msg = ApiMsg::DeleteImage(key);
+        self.api_sender.send(msg).unwrap();
+    }
+
+    /// Adds a path geometry item.
+    pub fn add_geometry(&self, width: u32, height: u32, data: GeometryData) -> GeometryKey {
+        let new_id = self.next_unique_id();
+        let key = GeometryKey::new(new_id.0, new_id.1);
+        let msg = ApiMsg::AddGeometry(key, width, height, data);
+        self.api_sender.send(msg).unwrap();
+        key
+    }
+
+    pub fn delete_geometry(&self, key: GeometryKey) {
+        let msg = ApiMsg::DeleteGeometry(key);
         self.api_sender.send(msg).unwrap();
     }
 

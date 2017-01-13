@@ -7,6 +7,7 @@ use device::TextureFilter;
 use fnv::FnvHasher;
 use frame::FrameId;
 use internal_types::{ExternalImageUpdateList, FontTemplate, SourceTexture, TextureUpdateList};
+use path::{PathPicture, PathRenderer};
 use platform::font::{FontContext, RasterizedGlyph};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -20,6 +21,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 use texture_cache::{TextureCache, TextureCacheItemId};
 use webrender_traits::{Epoch, FontKey, GlyphKey, ImageKey, ImageFormat, ImageRendering};
+use webrender_traits::{GeometryData, GeometryKey, GeometryItem};
 use webrender_traits::{FontRenderMode, ImageData, GlyphDimensions, WebGLContextId};
 use webrender_traits::{DevicePoint, DeviceIntSize};
 use webrender_traits::ExternalImageId;
@@ -191,17 +193,20 @@ struct WebGLTexture {
 pub struct ResourceCache {
     cached_glyphs: Option<GlyphCache>,
     cached_images: ResourceClassCache<ImageRequest, CachedImageInfo>,
+    cached_geos: ResourceClassCache<GeometryKey, TextureCacheItemId>, //TODO: PathKey?
 
     // TODO(pcwalton): Figure out the lifecycle of these.
     webgl_textures: HashMap<WebGLContextId, WebGLTexture, BuildHasherDefault<FnvHasher>>,
 
     font_templates: HashMap<FontKey, FontTemplate, BuildHasherDefault<FnvHasher>>,
     image_templates: HashMap<ImageKey, ImageResource, BuildHasherDefault<FnvHasher>>,
+    geo_templates: HashMap<GeometryKey, PathPicture, BuildHasherDefault<FnvHasher>>,
     enable_aa: bool,
     state: State,
     current_frame_id: FrameId,
 
     texture_cache: TextureCache,
+    path_renderer: PathRenderer,
 
     // TODO(gw): We should expire (parts of) this cache semi-regularly!
     cached_glyph_dimensions: HashMap<GlyphKey, Option<GlyphDimensions>, BuildHasherDefault<FnvHasher>>,
@@ -219,11 +224,14 @@ impl ResourceCache {
         ResourceCache {
             cached_glyphs: Some(ResourceClassCache::new()),
             cached_images: ResourceClassCache::new(),
+            cached_geos: ResourceClassCache::new(),
             webgl_textures: HashMap::with_hasher(Default::default()),
             font_templates: HashMap::with_hasher(Default::default()),
             image_templates: HashMap::with_hasher(Default::default()),
+            geo_templates: HashMap::with_hasher(Default::default()),
             cached_glyph_dimensions: HashMap::with_hasher(Default::default()),
             texture_cache: texture_cache,
+            path_renderer: PathRenderer::new(),
             state: State::Idle,
             enable_aa: enable_aa,
             current_frame_id: FrameId(0),
@@ -320,6 +328,25 @@ impl ResourceCache {
         }
 
         println!("Delete the non-exist key:{:?}", image_key);
+    }
+
+    pub fn add_geometry(&mut self, geo_key: GeometryKey, width: u32, height: u32, data: GeometryData) {
+        assert!(!self.geo_templates.contains_key(&geo_key));
+        if let Some(&GeometryItem::Path(ref commands)) = data.items.first() {
+            if data.items.len() > 1 {
+                println!("WARN: only one path is currently supported");
+            }
+            let picture = self.path_renderer.bake(commands);
+            let _image = self.path_renderer.draw(&picture, width, height);
+            self.geo_templates.insert(geo_key, picture);
+            unimplemented!()
+        }
+    }
+
+    pub fn delete_geometry(&mut self, geo_key: GeometryKey) {
+        if let Some(picture) = self.geo_templates.remove(&geo_key) {
+            self.path_renderer.clean(picture);
+        }
     }
 
     pub fn add_webgl_texture(&mut self, id: WebGLContextId, texture_id: SourceTexture, size: DeviceIntSize) {

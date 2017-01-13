@@ -4,7 +4,8 @@
 
 use display_list::AuxiliaryListsBuilder;
 use {BorderRadius, BorderDisplayItem, ClipRegion, ColorF, ComplexClipRegion};
-use {FontKey, ImageKey, PipelineId, ScrollLayerId, ScrollLayerInfo, ServoScrollRootId};
+use {FontKey, ImageKey, GeometryKey};
+use {PipelineId, ScrollLayerId, ScrollLayerInfo, ServoScrollRootId};
 use {ImageMask, ItemRange};
 use {LayoutSize, LayoutPoint, LayoutRect};
 
@@ -156,6 +157,12 @@ impl FontKey {
 impl ImageKey {
     pub fn new(key0: u32, key1: u32) -> ImageKey {
         ImageKey(key0, key1)
+    }
+}
+
+impl GeometryKey {
+    pub fn new(key0: u32, key1: u32) -> GeometryKey {
+        GeometryKey(key0, key1)
     }
 }
 

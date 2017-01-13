@@ -33,6 +33,11 @@ pub enum ApiMsg {
     UpdateImage(ImageKey, u32, u32, ImageFormat, Vec<u8>),
     /// Drops an image from the resource cache.
     DeleteImage(ImageKey),
+    /// Adds a geometry item.
+    AddGeometry(GeometryKey, u32, u32, GeometryData),
+    /// Drops a geometry item.
+    DeleteGeometry(GeometryKey),
+    /// Clones an API sender.
     CloneApi(MsgSender<IdNamespace>),
     /// Supplies a new frame to WebRender.
     ///
@@ -386,6 +391,28 @@ pub enum ImageRendering {
     Auto,
     CrispEdges,
     Pixelated,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub struct GeometryKey(u32, u32);
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub enum PathCommand {
+    MoveTo(LayoutPoint),
+    ClosePath,
+    LineTo(LayoutPoint),
+    //TODO: cubic, quadratic, elliptical curves
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub enum GeometryItem {
+    Path(Vec<PathCommand>),
+    //TODO: rectangles, circles, etc
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct GeometryData {
+    pub items: Vec<GeometryItem>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]

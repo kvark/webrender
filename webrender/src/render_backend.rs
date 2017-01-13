@@ -146,6 +146,12 @@ impl RenderBackend {
                         ApiMsg::DeleteImage(id) => {
                             self.resource_cache.delete_image_template(id);
                         }
+                        ApiMsg::AddGeometry(id, width, height, data) => {
+                            self.resource_cache.add_geometry(id, width, height, data);
+                        }
+                        ApiMsg::DeleteGeometry(id) => {
+                            self.resource_cache.delete_geometry(id);
+                        }
                         ApiMsg::CloneApi(sender) => {
                             let result = self.next_namespace_id;
 

@@ -48,6 +48,8 @@ extern crate lazy_static;
 extern crate log;
 #[macro_use]
 extern crate bitflags;
+#[cfg(feature = "skia")]
+extern crate skia;
 
 mod batch_builder;
 mod debug_colors;
@@ -61,6 +63,7 @@ mod gpu_store;
 mod internal_types;
 mod layer;
 mod mask_cache;
+mod path;
 mod prim_store;
 mod profiler;
 mod record;
