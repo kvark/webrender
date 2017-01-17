@@ -396,6 +396,11 @@ pub enum ImageRendering {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct GeometryKey(u32, u32);
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct GeometryDisplayItem {
+    pub geo_key: GeometryKey,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum PathCommand {
     MoveTo(LayoutPoint),
@@ -554,6 +559,7 @@ pub enum SpecificDisplayItem {
     Text(TextDisplayItem),
     Image(ImageDisplayItem),
     YuvImage(YuvImageDisplayItem),
+    Geometry(GeometryDisplayItem),
     WebGL(WebGLDisplayItem),
     Border(BorderDisplayItem),
     BoxShadow(BoxShadowDisplayItem),

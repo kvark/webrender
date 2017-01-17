@@ -809,6 +809,11 @@ impl Frame {
                                                   info.v_image_key,
                                                   info.color_space);
                 }
+                SpecificDisplayItem::Geometry(ref info) => {
+                    context.builder.add_geometry(item.rect,
+                                                 &item.clip,
+                                                 info.geo_key);
+                },
                 SpecificDisplayItem::Text(ref text_info) => {
                     context.builder.add_text(item.rect,
                                              &item.clip,

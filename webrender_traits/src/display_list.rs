@@ -11,6 +11,7 @@ use {BuiltDisplayListDescriptor, ClipRegion, ComplexClipRegion, ColorF};
 use {DisplayItem, DisplayListMode, FilterOp, YuvColorSpace};
 use {FontKey, GlyphInstance, GradientDisplayItem, GradientStop, IframeDisplayItem};
 use {ImageDisplayItem, ImageKey, ImageMask, ImageRendering, ItemRange, MixBlendMode, PipelineId};
+use {GeometryDisplayItem, GeometryKey};
 use {PushScrollLayerItem, PushStackingContextDisplayItem, RectangleDisplayItem, ScrollLayerId};
 use {ScrollPolicy, ServoScrollRootId, SpecificDisplayItem, StackingContext, TextDisplayItem};
 use {WebGLContextId, WebGLDisplayItem, YuvImageDisplayItem};
@@ -128,6 +129,23 @@ impl DisplayListBuilder {
             rect: rect,
             clip: clip,
         });
+    }
+
+    pub fn push_geometry(&mut self,
+                         rect: LayoutRect,
+                         clip: ClipRegion,
+                         key: GeometryKey) {
+        let item = GeometryDisplayItem {
+            geo_key: key,
+        };
+
+        let display_item = DisplayItem {
+            item: SpecificDisplayItem::Geometry(item),
+            rect: rect,
+            clip: clip,
+        };
+
+        self.list.push(display_item);
     }
 
     pub fn push_webgl_canvas(&mut self,

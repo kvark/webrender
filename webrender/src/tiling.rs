@@ -34,6 +34,7 @@ use util::{self, rect_from_points, rect_from_points_f};
 use util::{TransformedRect, TransformedRectKind, subtract_rect, pack_as_float};
 use webrender_traits::{ColorF, FontKey, ImageKey, ImageRendering, MixBlendMode};
 use webrender_traits::{BorderDisplayItem, BorderSide, BorderStyle, YuvColorSpace};
+use webrender_traits::{GeometryKey};
 use webrender_traits::{AuxiliaryLists, ItemRange, BoxShadowClipMode, ClipRegion};
 use webrender_traits::{PipelineId, ScrollLayerId, WebGLContextId, FontRenderMode};
 use webrender_traits::{DeviceIntRect, DeviceIntPoint, DeviceIntSize, DeviceIntLength, device_length};
@@ -2472,6 +2473,16 @@ impl FrameBuilder {
         self.add_primitive(&rect,
                            clip_region,
                            PrimitiveContainer::YuvImage(prim_cpu, prim_gpu));
+    }
+
+    pub fn add_geometry(&mut self,
+                        rect: LayerRect,
+                        clip_region: &ClipRegion,
+                        geo_key: GeometryKey) {
+
+        //self.add_primitive(&rect, clip_region, PrimitiveContainer::Geometry(geo_key));
+        self.add_image(rect, clip_region, &rect.size, &LayerSize::zero(),
+                       geo_key.into(), ImageRendering::Auto);
     }
 
     /// Compute the contribution (bounding rectangles, and resources) of layers and their
