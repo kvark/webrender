@@ -313,21 +313,16 @@ impl ResourceCache {
     }
 
     pub fn delete_image_template(&mut self, image_key: ImageKey) {
-        let value = self.image_templates.remove(&image_key);
-
         // If the key is associated to an external image, pass the external id to renderer for cleanup.
-        if let Some(image) = value {
-            match image.data {
-                ImageData::External(id) => {
-                    self.pending_external_image_update_list.push(id);
-                },
-                _ => {},
+        match self.image_templates.remove(&image_key) {
+            Some(ImageResource{ data: ImageData::External(id), ..}) => {
+                self.pending_external_image_update_list.push(id);
+            },
+            Some(_) => (),
+            None => {
+                println!("Delete the non-exist key:{:?}", image_key);
             }
-
-            return;
         }
-
-        println!("Delete the non-exist key:{:?}", image_key);
     }
 
     pub fn add_geometry(&mut self, geo_key: GeometryKey, width: u32, height: u32, data: GeometryData) {
@@ -337,9 +332,12 @@ impl ResourceCache {
                 println!("WARN: only one path is currently supported");
             }
             let mut picture = self.path_renderer.bake(commands);
-            let _image = self.path_renderer.draw(&mut picture, width, height);
+            let image_bytes = self.path_renderer.draw(&mut picture, width, height);
             self.geo_templates.insert(geo_key, picture);
-            unimplemented!()
+            self.add_image_template(geo_key.into(),
+                                    width, height, None,
+                                    ImageFormat::A8,
+                                    ImageData::new(image_bytes));
         }
     }
 
@@ -347,6 +345,7 @@ impl ResourceCache {
         if let Some(picture) = self.geo_templates.remove(&geo_key) {
             self.path_renderer.clean(picture);
         }
+        self.delete_image_template(geo_key.into());
     }
 
     pub fn add_webgl_texture(&mut self, id: WebGLContextId, texture_id: SourceTexture, size: DeviceIntSize) {

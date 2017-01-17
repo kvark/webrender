@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use std::{iter, mem, ptr, slice};
+use std::{mem, ptr, slice};
 use webrender_traits::{PathCommand};
 
 #[cfg(feature = "skia")]
@@ -16,7 +16,6 @@ pub struct PathPicture {
 
 pub struct PathRenderer {
     lib: FT_Library,
-    data: Vec<u8>,
 }
 
 impl PathRenderer {
@@ -39,7 +38,6 @@ impl PathRenderer {
 
         PathRenderer {
             lib: lib,
-            data: Vec::new(),
         }
     }
 
@@ -115,16 +113,15 @@ impl PathRenderer {
         }
     }
 
-    pub fn draw(&mut self, picture: &mut PathPicture, width: u32, height: u32) -> &[u8] {
-        self.data.clear();
-        self.data.extend(iter::repeat(0).take((width * height) as usize));
+    pub fn draw(&mut self, picture: &mut PathPicture, width: u32, height: u32) -> Vec<u8> {
+        let mut data = vec![0u8; (width * height) as usize];
         //TODO: use FT_Bitmap_Init ?
         let mut params = FT_Raster_Params {
             target: &mut FT_Bitmap {
                 rows: height,
                 width: width,
                 pitch: width as i32,
-                buffer: self.data.as_mut_ptr() as *mut _,
+                buffer: data.as_mut_ptr() as *mut _,
                 num_grays: 0x100,
                 pixel_mode: FT_PIXEL_MODE_GRAY,
                 palette_mode: 0,
@@ -150,7 +147,7 @@ impl PathRenderer {
         if !result.succeeded() {
             println!("WARN: Failed to render an outline!");
         }
-        &self.data
+        data
     }
 
     pub fn clean(&mut self, mut picture: PathPicture) {

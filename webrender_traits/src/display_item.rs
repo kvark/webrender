@@ -166,6 +166,12 @@ impl GeometryKey {
     }
 }
 
+impl From<GeometryKey> for ImageKey {
+    fn from(key: GeometryKey) -> ImageKey {
+        ImageKey(key.0, key.1)
+    }
+}
+
 impl ScrollLayerId {
     pub fn new(pipeline_id: PipelineId,
                index: usize,
