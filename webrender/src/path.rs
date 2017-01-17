@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use std::{mem, ptr};
+use std::{iter, mem, ptr, slice};
 use webrender_traits::{PathCommand};
 
 #[cfg(feature = "skia")]
@@ -16,6 +16,7 @@ pub struct PathPicture {
 
 pub struct PathRenderer {
     lib: FT_Library,
+    data: Vec<u8>,
 }
 
 impl PathRenderer {
@@ -38,31 +39,123 @@ impl PathRenderer {
 
         PathRenderer {
             lib: lib,
+            data: Vec::new(),
         }
     }
 
     pub fn bake(&mut self, commands: &[PathCommand]) -> PathPicture {
-        let max_points = commands.len() as u32;
-        let max_countours = commands.len() as u32;
+        let (num_points, num_contours) = commands.iter().fold((0, 0),
+            |(np, nc), com| match com {
+                &PathCommand::MoveTo(_) => (np, nc),
+                &PathCommand::ClosePath => (np+1, nc+1),
+                &PathCommand::LineTo(_) => (np+2, nc+1),
+            }
+        );
         let mut outline: FT_Outline = unsafe { mem::zeroed() };
         let result = unsafe {
-            FT_New_Outline(self.lib, max_points, max_countours, &mut outline)
+            FT_Outline_New(self.lib, num_points as u32, num_contours as u32, &mut outline)
         };
         if !result.succeeded() {
             panic!("Unable to create FT_Outline {}", result);
         }
+
+        let (points, tags, contours) = unsafe {(
+            slice::from_raw_parts_mut(outline.points, num_points),
+            slice::from_raw_parts_mut(outline.tags, num_points),
+            slice::from_raw_parts_mut(outline.contours, num_contours),
+        )};
+        let (_, _, in_contour, _) = commands.iter().fold((0, 0, false, FT_Vector{x:0,y:0}),
+            |(mut np, mut nc, in_contour, cur), com| match com {
+                &PathCommand::MoveTo(p) => {
+                    if in_contour {
+                        contours[nc as usize] = np-1;
+                        nc += 1;
+                    }
+                    (np, nc, false, FT_Vector {
+                        x: p.x as i64, //TODO: rounding
+                        y: p.y as i64,
+                    })
+                },
+                &PathCommand::ClosePath => {
+                    if in_contour {
+                        points[np as usize] = FT_Vector {
+                            x: cur.x,
+                            y: cur.y,
+                        };
+                        tags[np as usize] = 0x1;
+                        contours[nc as usize] = np;
+                        np += 1;
+                        nc += 1;
+                    }
+                    (np, nc, false, cur)
+                },
+                &PathCommand::LineTo(p) => {
+                    if !in_contour {
+                        points[np as usize] = cur;
+                        tags[np as usize] = 0x1; //TODO
+                        np += 1;
+                    }
+                    points[np as usize] = FT_Vector {
+                        x: p.x as i64, //TODO: rounding
+                        y: p.y as i64,
+                    };
+                    tags[np as usize] = 0x1;
+                    contours[nc as usize] = np;
+                    (np+1, nc+1, true, FT_Vector {
+                        x: p.x as i64, //TODO: rounding
+                        y: p.y as i64,
+                    })
+                },
+            }
+        );
+        assert!(!in_contour); //TODO: warning or return error
+
         PathPicture {
             outline: outline,
         }
     }
 
-    pub fn draw(&mut self, _picture: &PathPicture, _width: u32, _height: u32) -> () {
-        unimplemented!()
+    pub fn draw(&mut self, picture: &mut PathPicture, width: u32, height: u32) -> &[u8] {
+        self.data.clear();
+        self.data.extend(iter::repeat(0).take((width * height) as usize));
+        //TODO: use FT_Bitmap_Init ?
+        let mut params = FT_Raster_Params {
+            target: &mut FT_Bitmap {
+                rows: height,
+                width: width,
+                pitch: width as i32,
+                buffer: self.data.as_mut_ptr() as *mut _,
+                num_grays: 0x100,
+                pixel_mode: FT_PIXEL_MODE_GRAY,
+                palette_mode: 0,
+                palette: ptr::null_mut(),
+            },
+            source: &mut picture.outline as *mut _ as *mut _,
+            flags: FT_RASTER_FLAG_AA, //TODO
+            gray_spans: ptr::null_mut(),
+            black_spans: ptr::null_mut(),
+            bit_test: ptr::null_mut(),
+            bit_set: ptr::null_mut(),
+            user: ptr::null_mut(),
+            clip_box: FT_BBox { //TODO
+                xMin: 0,
+                yMin: 0,
+                xMax: 1,
+                yMax: 1,
+            },
+        };
+        let result = unsafe {
+            FT_Outline_Render(self.lib, &mut picture.outline, &mut params)
+        };
+        if !result.succeeded() {
+            println!("WARN: Failed to render an outline!");
+        }
+        &self.data
     }
 
     pub fn clean(&mut self, mut picture: PathPicture) {
         let result = unsafe {
-            FT_Done_Outline(self.lib, &mut picture.outline)
+            FT_Outline_Done(self.lib, &mut picture.outline)
         };
         if !result.succeeded() {
             println!("WARN: Failed to delete an outline!");

@@ -150,7 +150,7 @@ impl FontContext {
 
                 if result.succeeded() {
                     let bitmap = &(*slot).bitmap;
-                    let bitmap_mode = bitmap.pixel_mode as u32;
+                    let bitmap_mode = bitmap.pixel_mode;
 
                     let metrics = &(*slot).metrics;
                     let mut glyph_width = (metrics.width >> 6) as i32;
@@ -177,8 +177,8 @@ impl FontContext {
                                     let x = ix + offset_x;
                                     let valid_byte = x >= 0 &&
                                                      y >= 0 &&
-                                                     x < bitmap.width &&
-                                                     y < bitmap.rows;
+                                                     x < bitmap.width as i32 &&
+                                                     y < bitmap.rows as i32;
                                     let byte_value = if valid_byte {
                                         let byte_index = (y * bitmap.pitch) + (x >> 3);
                                         let bit_index = x & 7;
@@ -217,7 +217,7 @@ impl FontContext {
 
                             for y in 0..bitmap.rows {
                                 for x in 0..(bitmap.width / 3) {
-                                    let index = (y * bitmap.pitch) + (x * 3);
+                                    let index = (y * bitmap.pitch as u32) + (x * 3);
                                     let ptr = bitmap.buffer.offset(index as isize);
                                     let b = *ptr;
                                     let g = *(ptr.offset(1));

@@ -336,8 +336,8 @@ impl ResourceCache {
             if data.items.len() > 1 {
                 println!("WARN: only one path is currently supported");
             }
-            let picture = self.path_renderer.bake(commands);
-            let _image = self.path_renderer.draw(&picture, width, height);
+            let mut picture = self.path_renderer.bake(commands);
+            let _image = self.path_renderer.draw(&mut picture, width, height);
             self.geo_templates.insert(geo_key, picture);
             unimplemented!()
         }

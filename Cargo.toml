@@ -9,3 +9,6 @@ members = [
 
 [profile.release]
 debug = true
+
+[replace]
+"freetype:0.1.3" = {path="../rust-freetype"}
