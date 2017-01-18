@@ -104,7 +104,7 @@ fn main() {
     let bounds = LayoutRect::new(LayoutPoint::new(0.0, 0.0), LayoutSize::new(width as f32, height as f32));
     let clip_region = {
         let complex = webrender_traits::ComplexClipRegion::new(
-            LayoutRect::new(LayoutPoint::new(50.0, 50.0), LayoutSize::new(100.0, 100.0)),
+            LayoutRect::new(LayoutPoint::new(50.0, 50.0), LayoutSize::new(600.0, 600.0)),
             webrender_traits::BorderRadius::uniform(20.0));
 
         builder.new_clip_region(&bounds, vec![complex], None)
@@ -118,6 +118,20 @@ fn main() {
                                   &LayoutTransform::identity(),
                                   webrender_traits::MixBlendMode::Normal,
                                   Vec::new());
+
+    if "geometry".len() > 0 {
+        let rect = LayoutRect::new(LayoutPoint::new(260.0, 260.0), LayoutSize::new(250.0, 250.0));
+        let geo_clip = builder.new_clip_region(&bounds, Vec::new(), None);
+        let geo_key = api.add_geometry(100, 100, webrender_traits::GeometryData {
+            items: vec![webrender_traits::GeometryItem::Path(vec![
+                webrender_traits::PathCommand::MoveTo(LayoutPoint::new(10.0, 10.0)),
+                webrender_traits::PathCommand::LineTo(LayoutPoint::new(300.0, 100.0)),
+                webrender_traits::PathCommand::LineTo(LayoutPoint::new(200.0, 300.0)),
+                webrender_traits::PathCommand::ClosePath,
+            ])],
+        });
+        builder.push_geometry(rect, geo_clip, geo_key);
+    }
 
     let sub_clip = {
         let mask = webrender_traits::ImageMask {
@@ -150,7 +164,6 @@ fn main() {
                         border_side,
                         border_side,
                         webrender_traits::BorderRadius::uniform(20.0));
-
 
     if false { // draw text?
         let font_bytes = load_file("res/FreeSans.ttf");

@@ -42,13 +42,15 @@ impl PathRenderer {
     }
 
     pub fn bake(&mut self, commands: &[PathCommand]) -> PathPicture {
-        let (num_points, num_contours) = commands.iter().fold((0, 0),
-            |(np, nc), com| match com {
-                &PathCommand::MoveTo(_) => (np, nc),
-                &PathCommand::ClosePath => (np+1, nc+1),
-                &PathCommand::LineTo(_) => (np+2, nc+1),
+        let (num_points, num_contours, contour) = commands.iter().fold((0, 0, 0),
+            |(np, nc, contour), com| match com {
+                &PathCommand::MoveTo(_) => (np, nc+contour, 0),
+                &PathCommand::ClosePath => (np+contour, nc+contour, 0),
+                &PathCommand::LineTo(_) => (np+2-contour, nc+1, 1),
             }
         );
+        assert_eq!(contour, 0); //TODO: warning or return error
+
         let mut outline: FT_Outline = unsafe { mem::zeroed() };
         let result = unsafe {
             FT_Outline_New(self.lib, num_points as u32, num_contours as u32, &mut outline)
@@ -62,7 +64,7 @@ impl PathRenderer {
             slice::from_raw_parts_mut(outline.tags, num_points),
             slice::from_raw_parts_mut(outline.contours, num_contours),
         )};
-        let (_, _, in_contour, _) = commands.iter().fold((0, 0, false, FT_Vector{x:0,y:0}),
+        let (num_points2, num_contours2, _, _) = commands.iter().fold((0, 0, false, FT_Vector{x:0,y:0}),
             |(mut np, mut nc, in_contour, cur), com| match com {
                 &PathCommand::MoveTo(p) => {
                     if in_contour {
@@ -106,7 +108,8 @@ impl PathRenderer {
                 },
             }
         );
-        assert!(!in_contour); //TODO: warning or return error
+        assert_eq!(num_points2 as usize, num_points);
+        assert_eq!(num_contours2 as usize, num_contours);
 
         PathPicture {
             outline: outline,
@@ -137,15 +140,15 @@ impl PathRenderer {
             clip_box: FT_BBox { //TODO
                 xMin: 0,
                 yMin: 0,
-                xMax: 1,
-                yMax: 1,
+                xMax: 500,
+                yMax: 500,
             },
         };
         let result = unsafe {
             FT_Outline_Render(self.lib, &mut picture.outline, &mut params)
         };
         if !result.succeeded() {
-            println!("WARN: Failed to render an outline!");
+            println!("WARN: Failed to render an outline, error {}!", result);
         }
         data
     }
