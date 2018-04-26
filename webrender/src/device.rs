@@ -3193,8 +3193,15 @@ impl<B: hal::Backend> Device<B> {
     ) {
         let mut cmd_buffer = self.command_pool.acquire_command_buffer(false);
 
-        if let Some(_rect) = rect {
-            //TODO handle scissors
+        if let Some(rect) = rect {
+            cmd_buffer.set_scissors(0, &[
+                hal::pso::Rect {
+                    x: rect.origin.x as u16,
+                    y: rect.origin.y as u16,
+                    w: rect.size.width as u16,
+                    h: rect.size.height as u16,
+                },
+            ]);
         }
 
         let (img, layer, dimg) = if self.bound_draw_fbo != DEFAULT_DRAW_FBO {

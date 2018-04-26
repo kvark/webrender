@@ -2418,10 +2418,14 @@ impl<B: hal::Backend> Renderer<B> {
                                     .expect("Found external image, but no handler set!");
                                 match handler.lock(id, channel_index).source {
                                     ExternalImageSource::RawData(data) => {
-                                        uploader.upload(
-                                            rect, layer_index, stride,
+                                        self.device.upload_texture(
+                                            texture, rect, layer_index, stride,
                                             &data[offset as usize ..],
                                         );
+                                        /*uploader.upload(
+                                            rect, layer_index, stride,
+                                            &data[offset as usize ..],
+                                        );*/
                                     }
                                     ExternalImageSource::Invalid => {
                                         // Create a local buffer to fill the pbo.

@@ -23,6 +23,7 @@ dx12 = []   # for the examples
 app_units = "0.6"
 byteorder = "1.0"
 bincode = "1.0"
+cfg-if = "0.1.2"
 euclid = "0.17"
 fxhash = "0.2.1"
 gleam = "0.4.32"
@@ -40,10 +41,10 @@ smallvec = "0.6"
 ws = { optional = true, version = "0.7.3" }
 serde_json = { optional = true, version = "1.0" }
 serde = { optional = true, version = "1.0", features = ["serde_derive"] }
-image = { optional = true, version = "0.18" }
-base64 = { optional = true, version = "0.6" }
+image = { optional = true, version = "0.17" }
+base64 = { optional = true, version = "0.3.0" }
 ron = { optional = true, version = "0.1.7" }
-cfg-if = "0.1.2"
+winit = "0.12"
 gfx-hal = { git = "https://github.com/gfx-rs/gfx.git" }
 rand = "0.4"
 
@@ -68,9 +69,11 @@ optional = true
 [dev-dependencies]
 mozangle = "0.1"
 env_logger = "0.5"
-glutin = "0.13"             # for the example apps
+rand = "0.3"                # for the benchmarks
+glutin = "0.14"             # for the example apps
 winit = "0.12"
 gfx-backend-vulkan = { git = "https://github.com/gfx-rs/gfx.git" }
+gfx-backend-empty = { git = "https://github.com/gfx-rs/gfx.git" }
 
 [target.'cfg(windows)'.dev-dependencies]
 gfx-backend-dx12 = { git = "https://github.com/gfx-rs/gfx.git" }
