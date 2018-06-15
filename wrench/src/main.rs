@@ -28,7 +28,9 @@ extern crate glutin;
 extern crate gfx_backend_vulkan as back;
 #[cfg(feature = "dx12")]
 extern crate gfx_backend_dx12 as back;
-#[cfg(not(any(feature = "vulkan", feature = "dx12", feature = "gl")))]
+#[cfg(feature = "metal")]
+extern crate gfx_backend_metal as back;
+#[cfg(not(any(feature = "vulkan", feature = "dx12", feature = "metal", feature = "gl")))]
 extern crate gfx_backend_empty as back;
 #[cfg(not(feature = "gl"))]
 extern crate gfx_hal as hal;
@@ -789,7 +791,7 @@ fn main() {
     wrench.renderer.deinit();
 }
 
-#[cfg(any(feature = "vulkan", feature = "dx12"))]
+#[cfg(any(feature = "vulkan", feature = "dx12", feature = "metal"))]
 fn main() {
     #[cfg(feature = "logging")]
         env_logger::init();
@@ -1113,7 +1115,7 @@ fn main() {
     wrench.renderer.deinit();
 }
 
-#[cfg(not(any(feature = "dx12", feature = "gl", feature = "vulkan")))]
+#[cfg(not(any(feature = "dx12", feature = "gl", feature = "vulkan", feature = "metal")))]
 fn main() {
     println!("You need to enable native API features (dx12/gl/vulkan) in order to test webrender");
 }

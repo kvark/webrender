@@ -2164,7 +2164,7 @@ impl<B: hal::Backend> Device<B> {
                 let cores = images
                     .into_iter()
                     .map(|image| {
-                        ImageCore::from_image(&device, image, hal::image::ViewKind::D2Array, surface_format, COLOR_RANGE.clone())
+                        ImageCore::from_image(&device, image, hal::image::ViewKind::D2, surface_format, COLOR_RANGE.clone())
                     })
                     .collect::<Vec<_>>();
                 let fbos = cores

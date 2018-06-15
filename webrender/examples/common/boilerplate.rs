@@ -9,7 +9,9 @@ extern crate gfx_hal;
 extern crate gfx_backend_vulkan as back;
 #[cfg(feature = "dx12")]
 extern crate gfx_backend_dx12 as back;
-#[cfg(not(any(feature = "dx12", feature = "vulkan")))]
+#[cfg(feature = "metal")]
+extern crate gfx_backend_metal as back;
+#[cfg(not(any(feature = "dx12", feature = "vulkan", feature = "metal")))]
 extern crate gfx_backend_empty as back;
 
 use std::env;
@@ -97,7 +99,7 @@ pub trait Example {
     }
 }
 
-#[cfg(any(feature = "vulkan", feature = "dx12"))]
+#[cfg(any(feature = "vulkan", feature = "dx12", feature="metal"))]
 pub fn main_wrapper<E: Example>(
     example: &mut E,
     options: Option<webrender::RendererOptions>,
@@ -279,7 +281,7 @@ pub fn main_wrapper<E: Example>(
     renderer.deinit();
 }
 
-#[cfg(not(any(feature = "vulkan", feature = "dx12")))]
+#[cfg(not(any(feature = "vulkan", feature = "dx12", feature = "metal")))]
 pub fn main_wrapper<E: Example>(
     _example: &mut E,
     _options: Option<webrender::RendererOptions>,

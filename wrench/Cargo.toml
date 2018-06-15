@@ -16,6 +16,7 @@ euclid = "0.17"
 gfx-hal = { git = "https://github.com/gfx-rs/gfx.git" }
 gfx-backend-vulkan = { git = "https://github.com/gfx-rs/gfx.git", optional = true }
 gfx-backend-dx12 = { git = "https://github.com/gfx-rs/gfx.git", optional = true }
+gfx-backend-metal = { git = "https://github.com/gfx-rs/gfx.git", optional = true }
 gfx-backend-empty = { git = "https://github.com/gfx-rs/gfx.git" }
 gleam = { version = "0.4", optional = true }
 glutin = { version = "0.16", optional = true }
@@ -47,6 +48,7 @@ headless = [ "osmesa-sys", "osmesa-src" ]
 pathfinder = [ "webrender/pathfinder" ]
 vulkan = [ "gfx-backend-vulkan" ]
 dx12 = [ "gfx-backend-dx12" ]
+metal = [ "gfx-backend-metal" ]
 gl = [ "gleam", "glutin", "mozangle" ]
 
 [target.'cfg(target_os = "windows")'.dependencies]

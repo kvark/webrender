@@ -18,6 +18,7 @@ debug_renderer = []
 pathfinder = ["pathfinder_font_renderer", "pathfinder_gfx_utils", "pathfinder_partitioner", "pathfinder_path_utils"]
 serialize_program = ["serde"]
 vulkan = [] # for the examples
+metal = [] # for the examples
 dx12 = []   # for the examples
 
 [dependencies]
@@ -71,11 +72,16 @@ mozangle = "0.1"
 env_logger = "0.5"
 glutin = "0.16"             # for the example apps
 winit = "0.15"              # for the example apps
-gfx-backend-vulkan = { git = "https://github.com/gfx-rs/gfx.git" }
 gfx-backend-empty = { git = "https://github.com/gfx-rs/gfx.git" }
+
+[target.'cfg(all(any(unix, windows), not(target_os = "macos")))'.dev-dependencies]
+gfx-backend-vulkan = { git = "https://github.com/gfx-rs/gfx.git" }
 
 [target.'cfg(windows)'.dev-dependencies]
 gfx-backend-dx12 = { git = "https://github.com/gfx-rs/gfx.git" }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+gfx-backend-metal = { git = "https://github.com/gfx-rs/gfx.git" }
 
 [target.'cfg(any(target_os = "android", all(unix, not(target_os = "macos"))))'.dependencies]
 freetype = { version = "0.4", default-features = false }
