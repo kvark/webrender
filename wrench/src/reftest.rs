@@ -376,6 +376,7 @@ impl<'a> ReftestHarness<'a> {
             }
             other => panic!("Unknown reftest extension: {}", other),
         };
+        println!("window_size={}", reference.size);
 
         // the reference can be smaller than the window size,
         // in which case we only compare the intersection
@@ -445,11 +446,11 @@ impl<'a> ReftestHarness<'a> {
                     "number of differing pixels",
                     count_different
                 );
-                /*println!("REFTEST   IMAGE 1 (TEST): {}", test.create_data_uri());
+                println!("REFTEST   IMAGE 1 (TEST): {}", test.create_data_uri());
                 println!(
                     "REFTEST   IMAGE 2 (REFERENCE): {}",
                     reference.create_data_uri()
-                );*/
+                );
                 println!("REFTEST TEST-END | {}", t);
 
                 false

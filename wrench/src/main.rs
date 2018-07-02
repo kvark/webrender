@@ -233,13 +233,13 @@ impl WindowWrapper {
     #[cfg(not(feature = "gl"))]
     fn get_inner_size(&self) -> DeviceUintSize {
         //HACK: `winit` needs to figure out its hidpi story...
-        #[cfg(target_os = "macos")]
+        /*#[cfg(target_os = "macos")]
         fn inner_size(window: &winit::Window) -> (u32, u32) {
             let (w, h) = window.get_inner_size().unwrap();
             let factor = window.hidpi_factor();
             ((w as f32 * factor) as _, (h as f32 * factor) as _)
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(target_os = "macos"))]*/
         fn inner_size(window: &winit::Window) -> (u32, u32) {
             window.get_inner_size().unwrap()
         }
@@ -428,7 +428,8 @@ fn make_window(
                 .with_multitouch()
                 .with_min_dimensions(size.width, size.height)
                 .build(events_loop).unwrap();
-            assert!(window.get_inner_size().unwrap() == (size.width, size.height));
+            println!("window.get_inner_size()={:?}, size.width={}, size.height={}", window.get_inner_size().unwrap(),size.width, size.height);
+            //assert!(window.get_inner_size().unwrap() == (size.width, size.height));
             return WindowWrapper::Window(window);
         }
         None => return WindowWrapper::Headless(HeadlessContext::new(size.width, size.height)),
@@ -862,7 +863,7 @@ fn main() {
         adapter,
         &mut surface,
         res_path,
-        dp_ratio,
+        1.0,//dp_ratio,
         save_type,
         dim,
         args.is_present("rebuild"),

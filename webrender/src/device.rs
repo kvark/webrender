@@ -1545,10 +1545,10 @@ impl<B: hal::Backend> Program<B> {
             &self.pipelines.get(&(blend_state, depth_test)).expect(&format!("The blend state {:?} with depth test {:?} not found for {} program!", blend_state, depth_test, self.shader_name)));
         cmd_buffer.bind_vertex_buffers(
             0,
-            hal::pso::VertexBufferSet(vec![
+            vec![
                 (&self.vertex_buffer.buffer, 0),
                 (&self.instance_buffer[next_id].buffer.buffer, 0),
-            ]),
+            ],
         );
 
         if let Some(ref index_buffer) = self.index_buffer {
@@ -1986,6 +1986,7 @@ impl<B: hal::Backend> Device<B> {
         upload_method: UploadMethod,
         _file_changed_handler: Box<FileWatcherHandler>,
         _cached_programs: Option<Rc<ProgramCache>>,
+        device_pixel_ratio: f32,
         adapter: &hal::Adapter<B>,
         surface: &mut <B as hal::Backend>::Surface,
         window_size: (u32, u32),
@@ -2009,10 +2010,11 @@ impl<B: hal::Backend> Device<B> {
 
         let extent = caps.current_extent.unwrap_or(
             hal::window::Extent2D {
-                width: window_size.0.max(caps.extents.start.width).min(caps.extents.end.width),
-                height: window_size.1.max(caps.extents.start.height).min(caps.extents.end.height),
+                width: (window_size.0),// as f32 / device_pixel_ratio) as u32,//.max(caps.extents.start.width).min(caps.extents.end.width),
+                height: (window_size.1),// as f32 / device_pixel_ratio) as u32,//.max(caps.extents.start.height).min(caps.extents.end.height),
             }
         );
+        println!("extent={:?}", extent);
 
         let memory_types = adapter
             .physical_device
@@ -2287,7 +2289,7 @@ impl<B: hal::Backend> Device<B> {
             _resource_override_path: resource_override_path,
             // This is initialized to 1 by default, but it is reset
             // at the beginning of each frame in `Renderer::bind_frame_data`.
-            device_pixel_ratio: 1.0,
+            device_pixel_ratio,
             upload_method,
             inside_frame: false,
 
@@ -3789,7 +3791,7 @@ impl<B: hal::Backend> Device<B> {
 
     pub fn set_next_frame_id(&mut self) {
         self.current_frame_id = self.swap_chain
-            .acquire_frame(FrameSync::Semaphore(&mut self.image_available_semaphore)).unwrap() as _;
+            .acquire_image(FrameSync::Semaphore(&mut self.image_available_semaphore)).unwrap() as _;
     }
 
     pub fn swap_buffers(&mut self) {
@@ -3820,7 +3822,7 @@ impl<B: hal::Backend> Device<B> {
 
             // present frame
             self.swap_chain
-                .present(&mut self.queue_group.queues[0], self.current_frame_id as _, Some(&self.render_finished_semaphore));
+                .present(&mut self.queue_group.queues[0], self.current_frame_id as _, Some(&self.render_finished_semaphore)).unwrap();
         }
         self.upload_queue.clear();
         self.next_id = (self.next_id + 1) % MAX_FRAME_COUNT;

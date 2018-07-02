@@ -1480,12 +1480,14 @@ impl<B: hal::Backend> Renderer<B> {
             result_tx: result_tx.clone(),
             notifier: notifier.clone(),
         };
+        let device_pixel_ratio = options.device_pixel_ratio;
 
         let mut device = Device::new(
             options.resource_override_path.clone(),
             options.upload_method.clone(),
             Box::new(file_watch_handler),
             options.cached_programs.take(),
+            device_pixel_ratio,
             adapter,
             surface,
             window_size,
@@ -1664,7 +1666,6 @@ impl<B: hal::Backend> Renderer<B> {
             dual_source_blending_is_supported: ext_dual_source_blending,
         };
 
-        let device_pixel_ratio = options.device_pixel_ratio;
         // First set the flags to default and later call set_debug_flags to ensure any
         // potential transition when enabling a flag is run.
         let debug_flags = DebugFlags::default();
