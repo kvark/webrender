@@ -7,6 +7,7 @@ use webrender::api;
 
 fn bool_true() -> bool { true }
 fn bool_false() -> bool { false }
+fn yuv_color_space_709() -> api::YuvColorSpace { api::YuvColorSpace::Rec709 }
 
 pub type Document = HashMap<PipelineId, StackingContext>;
 
@@ -125,7 +126,6 @@ pub struct ComplexClip {
 
 #[derive(Serialize, Deserialize)]
 pub enum BorderRadius {
-    Zero,
     Uniform(f32),
     Custom {
         #[serde(default)]
@@ -141,7 +141,7 @@ pub enum BorderRadius {
 
 impl Default for BorderRadius {
     fn default() -> Self {
-        BorderRadius::Zero
+        BorderRadius::Uniform(0.0)
     }
 }
 
@@ -162,8 +162,24 @@ pub enum ItemKind {
         color: Color,
         bounds: LineBounds,
     },
-    Image,
-    YuvImage,
+    Image {
+        src: String,
+        bounds: ImageRect,
+        tile_size: Option<u16>,
+        stretch_size: Option<api::LayoutSize>,
+        #[serde(default = "api::LayoutSize::zero")]
+        tile_spacing: api::LayoutSize,
+        #[serde(default)]
+        rendering: api::ImageRendering,
+        #[serde(default)]
+        alpha_type: api::AlphaType,
+    },
+    YuvImage {
+        bounds: ImageRect,
+        #[serde(default = "yuv_color_space_709")]
+        color_space: api::YuvColorSpace,
+        kind: YuvKind,
+    },
     Text,
     ScrollFrame,
     StickyFrame,
@@ -181,7 +197,23 @@ pub enum ItemKind {
         #[serde(default)]
         extend: api::ExtendMode,
     },
-    BoxShadow,
+    BoxShadow {
+        bounds: api::LayoutRect,
+        #[serde(default)]
+        box_bounds: Option<api::LayoutRect>,
+        #[serde(default = "api::LayoutVector2D::zero")]
+        offset: api::LayoutVector2D,
+        #[serde(default = "Color::black")]
+        color: Color,
+        #[serde(default)]
+        blur_radius: f32,
+        #[serde(default)]
+        spread_radius: f32,
+        #[serde(default)]
+        border_radius: BorderRadius,
+        #[serde(default)]
+        clip_mode: api::BoxShadowClipMode,
+    },
     Iframe,
     StackingContext(StackingContext),
     PopAllShadows,
@@ -251,7 +283,7 @@ pub enum BorderKind {
         right: BorderSide,
     },
     Image {
-        path: String,
+        src: String,
         size: (i64, i64),
         #[serde(default = "bool_false")]
         fill: bool,
@@ -267,3 +299,26 @@ pub enum BorderKind {
 }
 
 pub type BorderSide = (api::BorderStyle, Color);
+
+#[derive(Serialize, Deserialize)]
+pub struct ImageRect {
+    pub origin: api::LayoutPoint,
+    #[serde(default)]
+    pub size: Option<api::LayoutSize>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum YuvKind {
+    Planar {
+        src_y: String,
+        src_u: String,
+        src_v: String,
+    },
+    Nv12 {
+        src_y: String,
+        src_uv: String,
+    },
+    Interleaved {
+        src: String,
+    },
+}

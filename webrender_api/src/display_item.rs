@@ -393,6 +393,12 @@ pub enum BoxShadowClipMode {
     Inset = 1,
 }
 
+impl Default for BoxShadowClipMode {
+    fn default() -> Self {
+        BoxShadowClipMode::Outset
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct BoxShadowDisplayItem {
     pub box_bounds: LayoutRect,
@@ -581,10 +587,22 @@ pub enum ImageRendering {
     Pixelated = 2,
 }
 
+impl Default for ImageRendering {
+    fn default() -> Self {
+        ImageRendering::Auto
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum AlphaType {
     Alpha = 0,
     PremultipliedAlpha = 1,
+}
+
+impl Default for AlphaType {
+    fn default() -> Self {
+        AlphaType::PremultipliedAlpha
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]

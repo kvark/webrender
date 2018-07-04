@@ -990,15 +990,16 @@ impl YamlFrameReader {
         let border_radius = item["border-radius"]
             .as_border_radius()
             .unwrap_or(BorderRadius::zero());
-        let clip_mode = if let Some(mode) = item["clip-mode"].as_str() {
-            match mode {
-                "outset" => BoxShadowClipMode::Outset,
-                "inset" => BoxShadowClipMode::Inset,
-                s => panic!("Unknown box shadow clip mode {}", s),
-            }
-        } else {
-            BoxShadowClipMode::Outset
-        };
+        let clip_mode = item["clip-mode"]
+            .as_str()
+            .map(|mode| {
+                match mode {
+                    "outset" => BoxShadowClipMode::Outset,
+                    "inset" => BoxShadowClipMode::Inset,
+                    s => panic!("Unknown box shadow clip mode {}", s),
+                }
+            })
+            .unwrap_or_default();
 
         dl.push_box_shadow(
             &info,
