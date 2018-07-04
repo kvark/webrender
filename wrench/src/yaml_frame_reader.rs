@@ -314,7 +314,7 @@ impl YamlFrameReader {
             .unwrap_or(BorderRadius::zero());
         let mode = item["clip-mode"]
             .as_clip_mode()
-            .unwrap_or(ClipMode::Clip);
+            .unwrap_or_default();
         ComplexClipRegion::new(rect, radius, mode)
     }
 
@@ -1547,10 +1547,10 @@ impl YamlFrameReader {
             .unwrap_or(TransformStyle::Flat);
         let mix_blend_mode = yaml["mix-blend-mode"]
             .as_mix_blend_mode()
-            .unwrap_or(MixBlendMode::Normal);
+            .unwrap_or_default();
         let glyph_raster_space = yaml["glyph-raster-space"]
             .as_glyph_raster_space()
-            .unwrap_or(GlyphRasterSpace::Screen);
+            .unwrap_or_default();
 
         if is_root {
             if let Some(size) = yaml["scroll-offset"].as_point() {

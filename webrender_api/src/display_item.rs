@@ -503,6 +503,12 @@ pub enum GlyphRasterSpace {
     Screen,
 }
 
+impl Default for GlyphRasterSpace {
+    fn default() -> Self {
+        GlyphRasterSpace::Screen
+    }
+}
+
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum MixBlendMode {
@@ -522,6 +528,12 @@ pub enum MixBlendMode {
     Saturation = 13,
     Color = 14,
     Luminosity = 15,
+}
+
+impl Default for MixBlendMode {
+    fn default() -> Self {
+        MixBlendMode::Normal
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
@@ -704,6 +716,12 @@ impl LocalClip {
 pub enum ClipMode {
     Clip,    // Pixels inside the region are visible.
     ClipOut, // Pixels outside the region are visible.
+}
+
+impl Default for ClipMode {
+    fn default() -> Self {
+        ClipMode::Clip
+    }
 }
 
 impl Not for ClipMode {

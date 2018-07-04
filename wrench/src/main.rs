@@ -42,6 +42,7 @@ extern crate yaml_rust;
 mod angle;
 mod binary_frame_reader;
 mod blob;
+mod data;
 mod egl;
 mod json_frame_writer;
 mod parse_function;
