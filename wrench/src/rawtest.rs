@@ -566,7 +566,7 @@ impl<'a> RawtestHarness<'a> {
                                         color: ColorF::new(0.0, 0.0, 0.0, 1.0),
                                     });
                 builder.push_line(&PrimitiveInfo::new(rect(110., 110., 50., 2.)),
-                                  0.0, LineOrientation::Horizontal,
+                                  LineOrientation::Horizontal,
                                   &ColorF::new(0.0, 0.0, 0.0, 1.0), LineStyle::Solid);
                 builder.restore();
             }

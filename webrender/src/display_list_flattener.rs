@@ -667,7 +667,6 @@ impl<'a> DisplayListFlattener<'a> {
                 self.add_line(
                     clip_and_scroll,
                     &prim_info,
-                    info.wavy_line_thickness,
                     info.orientation,
                     &info.color,
                     info.style,
@@ -1484,7 +1483,6 @@ impl<'a> DisplayListFlattener<'a> {
         &mut self,
         clip_and_scroll: ScrollNodeAndClipChain,
         info: &LayoutPrimitiveInfo,
-        wavy_line_thickness: f32,
         orientation: LineOrientation,
         line_color: &ColorF,
         style: LineStyle,
@@ -1498,7 +1496,7 @@ impl<'a> DisplayListFlattener<'a> {
             LineStyle::Solid => {
                 Vec::new()
             }
-            LineStyle::Wavy |
+            LineStyle::Wavy { .. } |
             LineStyle::Dotted |
             LineStyle::Dashed => {
                 vec![
@@ -1506,7 +1504,6 @@ impl<'a> DisplayListFlattener<'a> {
                         info.rect,
                         style,
                         orientation,
-                        wavy_line_thickness,
                     ),
                 ]
             }

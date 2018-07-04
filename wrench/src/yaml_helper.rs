@@ -126,16 +126,6 @@ define_string_enum!(
     [Horizontal = "horizontal", Vertical = "vertical"]
 );
 
-define_string_enum!(
-    LineStyle,
-    [
-        Solid = "solid",
-        Dotted = "dotted",
-        Dashed = "dashed",
-        Wavy = "wavy"
-    ]
-);
-
 define_string_enum!(ClipMode, [Clip = "clip", ClipOut = "clip-out"]);
 
 // Rotate around `axis` by `degrees` angle

@@ -1,10 +1,12 @@
 use std::collections::HashMap;
+use std::ops::Range;
 
+use euclid::SideOffsets2D;
 use webrender::api;
 
 
-fn default_backface_visible() -> bool { true }
-fn default_radius_component() -> f32 { 0.0 }
+fn bool_true() -> bool { true }
+fn bool_false() -> bool { false }
 
 pub type Document = HashMap<PipelineId, StackingContext>;
 
@@ -21,7 +23,7 @@ pub struct StackingContext {
     #[serde(default)]
     pub transform: Option<ComplexTransform>,
     #[serde(default)]
-    pub perspective: Perspective,
+    pub perspective: Option<Perspective>,
     #[serde(default)]
     pub clip_node: Option<ClipId>,
     #[serde(default)]
@@ -74,17 +76,10 @@ pub enum Axis {
 
 #[derive(Serialize, Deserialize)]
 pub enum Perspective {
-    None,
     Matrix(api::LayoutTransform),
     Simple {
         distance: f32,
         origin: Option<api::LayoutPoint>,
-    }
-}
-
-impl Default for Perspective {
-    fn default() -> Self {
-        Perspective::None
     }
 }
 
@@ -99,12 +94,12 @@ pub enum ClipId {
 pub struct Item {
     pub kind: ItemKind,
     #[serde(default)]
-    pub clip_and_scroll: ClipAndScroll,
+    pub clip_and_scroll: Option<ClipAndScroll>,
     #[serde(default)]
     pub complex_clip: Option<ComplexClip>,
     #[serde(default)]
     pub clip_rect: Option<api::LayoutRect>,
-    #[serde(default = "default_backface_visible")]
+    #[serde(default = "bool_true")]
     pub backface_visible: bool,
     #[serde(default)]
     pub tag: Option<(i64, i64)>,
@@ -112,18 +107,11 @@ pub struct Item {
 
 #[derive(Serialize, Deserialize)]
 pub enum ClipAndScroll {
-    None,
-    Same(ClipId),
-    Both {
+    Single(ClipId),
+    Custom {
         clip: ClipId,
         scroll: ClipId,
     },
-}
-
-impl Default for ClipAndScroll {
-    fn default() -> Self {
-        ClipAndScroll::None
-    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -140,13 +128,13 @@ pub enum BorderRadius {
     Zero,
     Uniform(f32),
     Custom {
-        #[serde(default = "default_radius_component")]
+        #[serde(default)]
         top_left: f32,
-        #[serde(default = "default_radius_component")]
+        #[serde(default)]
         top_right: f32,
-        #[serde(default = "default_radius_component")]
+        #[serde(default)]
         bottom_left: f32,
-        #[serde(default = "default_radius_component")]
+        #[serde(default)]
         bottom_right: f32,
     },
 }
@@ -159,11 +147,21 @@ impl Default for BorderRadius {
 
 #[derive(Serialize, Deserialize)]
 pub enum ItemKind {
-    Rect,
+    Rect {
+        bounds: api::LayoutRect,
+        #[serde(default = "Color::white")]
+        color: Color,
+    },
     ClearRect {
         bounds: api::LayoutRect,
     },
-    Line,
+    Line {
+        style: api::LineStyle,
+        orientation: api::LineOrientation,
+        #[serde(default = "Color::black")]
+        color: Color,
+        bounds: LineBounds,
+    },
     Image,
     YuvImage,
     Text,
@@ -171,11 +169,101 @@ pub enum ItemKind {
     StickyFrame,
     Clip,
     ClipChain,
-    Border,
-    Gradient,
-    RadialGradient,
+    Border {
+        bounds: api::LayoutRect,
+        widths: api::BorderWidths,
+        kind: BorderKind,
+    },
+    Gradient {
+        kind: GradientKind,
+        tiling: Option<GradientTile>,
+        stops: Vec<(f32, Color)>,
+        #[serde(default)]
+        extend: api::ExtendMode,
+    },
     BoxShadow,
     Iframe,
     StackingContext(StackingContext),
     PopAllShadows,
 }
+
+#[derive(Serialize, Deserialize)]
+pub enum Color {
+    Custom {
+        r: u8,
+        g: u8,
+        b: u8,
+        a: f32,
+    },
+    Black,
+    Blue,
+    Green,
+    Red,
+    White,
+    Yellow,
+}
+
+impl Color {
+    fn black() -> Self {
+        Color::Black
+    }
+    fn white() -> Self {
+        Color::White
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum LineBounds {
+    Rect(api::LayoutRect),
+    Baseline {
+        level: f32,
+        range: Range<f32>,
+        width: f32,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct GradientTile {
+    size: api::LayoutSize,
+    #[serde(default = "api::LayoutSize::zero")]
+    spacing: api::LayoutSize,
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum GradientKind {
+    Linear {
+        bounds: api::LayoutRect,
+        range: Range<api::LayoutPoint>,
+    },
+    Radial {
+        center: api::LayoutPoint,
+        radius: api::LayoutSize,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum BorderKind {
+    Normal {
+        radius: BorderRadius,
+        top: BorderSide,
+        bottom: BorderSide,
+        left: BorderSide,
+        right: BorderSide,
+    },
+    Image {
+        path: String,
+        size: (i64, i64),
+        #[serde(default = "bool_false")]
+        fill: bool,
+        slice: SideOffsets2D<u32>,
+        outset: SideOffsets2D<f32>,
+        repeat_horizontal: api::RepeatMode,
+        repeat_vertical: api::RepeatMode,
+    },
+    Gradient {
+        kind: GradientKind,
+        outset: SideOffsets2D<f32>,
+    },
+}
+
+pub type BorderSide = (api::BorderStyle, Color);

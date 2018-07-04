@@ -704,15 +704,17 @@ impl YamlFrameReader {
             .as_str()
             .and_then(LineOrientation::from_str)
             .expect("line must have orientation");
-        let style = item["style"]
-            .as_str()
-            .and_then(LineStyle::from_str)
-            .expect("line must have style");
-
-        let wavy_line_thickness = if let LineStyle::Wavy = style {
-            item["thickness"].as_f32().expect("wavy lines must have a thickness")
-        } else {
-            0.0
+        let style = match item["style"].as_str().expect("line must have style") {
+            "solid" => LineStyle::Solid,
+            "dotted" => LineStyle::Dotted,
+            "dashed" => LineStyle::Dashed,
+            "wavy" => {
+                let thickness = item["thickness"]
+                    .as_f32()
+                    .expect("wavy lines must have a thickness");
+                LineStyle::Wavy { thickness }
+            }
+            other => panic!("Unrecognized line style '{}'", other)
         };
 
         if item["baseline"].is_badvalue() {
@@ -746,7 +748,6 @@ impl YamlFrameReader {
 
         dl.push_line(
             &info,
-            wavy_line_thickness,
             orientation,
             &color,
             style,

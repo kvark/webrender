@@ -997,13 +997,11 @@ impl DisplayListBuilder {
     pub fn push_line(
         &mut self,
         info: &LayoutPrimitiveInfo,
-        wavy_line_thickness: f32,
         orientation: LineOrientation,
         color: &ColorF,
         style: LineStyle,
     ) {
         let item = SpecificDisplayItem::Line(LineDisplayItem {
-            wavy_line_thickness,
             orientation,
             color: *color,
             style,

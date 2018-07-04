@@ -731,12 +731,18 @@ impl YamlFrameWriter {
                 }
                 Line(item) => {
                     str_node(&mut v, "type", "line");
-                    if let LineStyle::Wavy = item.style {
-                        f32_node(&mut v, "thickness", item.wavy_line_thickness);
-                    }
+                    let style_id = match item.style {
+                        LineStyle::Solid => "solid",
+                        LineStyle::Dotted => "dotted",
+                        LineStyle::Dashed => "dashed",
+                        LineStyle::Wavy { thickness } => {
+                            f32_node(&mut v, "thickness", thickness);
+                            "wavy"
+                        },
+                    };
                     str_node(&mut v, "orientation", item.orientation.as_str());
                     color_node(&mut v, "color", item.color);
-                    str_node(&mut v, "style", item.style.as_str());
+                    str_node(&mut v, "style", style_id);
                 }
                 Text(item) => {
                     let gi = display_list.get(base.glyphs());

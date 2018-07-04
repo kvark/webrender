@@ -31,7 +31,6 @@ pub struct LineDecorationClipSource {
     rect: LayoutRect,
     style: LineStyle,
     orientation: LineOrientation,
-    wavy_line_thickness: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -140,14 +139,12 @@ impl ClipSource {
         rect: LayoutRect,
         style: LineStyle,
         orientation: LineOrientation,
-        wavy_line_thickness: f32,
     ) -> ClipSource {
         ClipSource::LineDecoration(
             LineDecorationClipSource {
                 rect,
                 style,
                 orientation,
-                wavy_line_thickness,
             }
         )
     }
@@ -404,10 +401,16 @@ impl ClipSources {
                         source.write(request);
                     }
                     ClipSource::LineDecoration(ref info) => {
+                        let (style_id, thickness) = match info.style {
+                            LineStyle::Solid => (0, 0.0),
+                            LineStyle::Dotted => (1, 0.0),
+                            LineStyle::Dashed => (2, 0.0),
+                            LineStyle::Wavy { thickness } => (3, thickness),
+                        };
                         request.push(info.rect);
                         request.push([
-                            info.wavy_line_thickness,
-                            pack_as_float(info.style as u32),
+                            thickness,
+                            pack_as_float(style_id),
                             pack_as_float(info.orientation as u32),
                             0.0,
                         ]);

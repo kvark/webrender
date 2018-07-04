@@ -222,7 +222,6 @@ pub struct RectangleDisplayItem {
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct LineDisplayItem {
     pub orientation: LineOrientation, // toggles whether above values are interpreted as x/y values
-    pub wavy_line_thickness: f32,
     pub color: ColorF,
     pub style: LineStyle,
 }
@@ -234,13 +233,14 @@ pub enum LineOrientation {
     Horizontal,
 }
 
-#[repr(u8)]
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub enum LineStyle {
     Solid,
     Dotted,
     Dashed,
-    Wavy,
+    Wavy {
+        thickness: f32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -417,6 +417,12 @@ pub struct Shadow {
 pub enum ExtendMode {
     Clamp,
     Repeat,
+}
+
+impl Default for ExtendMode {
+    fn default() -> Self {
+        ExtendMode::Clamp
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
