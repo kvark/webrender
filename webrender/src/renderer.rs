@@ -756,6 +756,7 @@ struct SourceTextureResolver {
 
 impl SourceTextureResolver {
     fn new<B: hal::Backend>(device: &mut Device<B>) -> Self {
+        println!("create dummy_cache_texture");
         let mut dummy_cache_texture = device
             .create_texture(TextureTarget::Array, ImageFormat::BGRA8);
         device.init_texture::<u8>(
@@ -767,6 +768,7 @@ impl SourceTextureResolver {
             1,
             None,
         );
+        println!("done");
 
         SourceTextureResolver {
             cache_texture_map: Vec::new(),

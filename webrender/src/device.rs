@@ -338,6 +338,7 @@ impl ExternalTexture {
     }
 }
 
+#[derive(Debug)]
 pub struct Texture {
     id: TextureId,
     _target: TextureTarget,
@@ -2062,7 +2063,8 @@ impl<B: hal::Backend> Device<B> {
             SwapchainConfig::new()
                 .with_color(surface_format)
                 //.with_image_count(min_image_count)
-                .with_image_count(MAX_FRAME_COUNT as _)
+                //.with_image_count(MAX_FRAME_COUNT as _)
+                .with_image_count(2 as _)
                 .with_image_usage(
                     hal::image::Usage::TRANSFER_SRC | hal::image::Usage::TRANSFER_DST | hal::image::Usage::COLOR_ATTACHMENT
                 );
@@ -2166,7 +2168,7 @@ impl<B: hal::Backend> Device<B> {
                 let cores = images
                     .into_iter()
                     .map(|image| {
-                        ImageCore::from_image(&device, image, hal::image::ViewKind::D2, surface_format, COLOR_RANGE.clone())
+                        ImageCore::from_image(&device, image, hal::image::ViewKind::D2Array, surface_format, COLOR_RANGE.clone())
                     })
                     .collect::<Vec<_>>();
                 let fbos = cores
@@ -2415,6 +2417,10 @@ impl<B: hal::Backend> Device<B> {
         let program = self.programs.get_mut(&self.bound_program).expect("Program not found.");
         let desc_set = self.descriptor_pools[self.next_id].get(&program.shader_kind);
         for &(index, sampler_name) in SAMPLERS.iter() {
+            if index == 3 {
+                let img = &self.images[&self.bound_textures[index]];
+                //println!("kind={:?} format={:?} view={:?}", img.kind, img.format, img.core.view);
+            }
             if self.bound_textures[index] != 0 {
                 let sampler = match self.bound_sampler[index] {
                     TextureFilter::Linear | TextureFilter::Trilinear => &self.sampler_linear,
@@ -2751,6 +2757,9 @@ impl<B: hal::Backend> Device<B> {
             TextureFilter::Linear => (hal::image::ViewKind::D2Array, 1),
             TextureFilter::Trilinear => (hal::image::ViewKind::D2Array, (width as f32).max(height as f32).log2().floor() as u8 + 1),
         };
+        //if view_kind == hal::image::ViewKind::D2Array && texture.layer_count == 1 {
+        //    texture.layer_count += 1;
+        //}
         let img = Image::new(
             &self.device,
             &self.memory_types,
@@ -2762,6 +2771,7 @@ impl<B: hal::Backend> Device<B> {
             mip_levels,
             (self.limits.min_buffer_copy_pitch_alignment - 1) as usize,
         );
+        //println!("init_image={:?}", img.core.view);
 
         assert_eq!(texture.fbo_ids.len(), 0);
 
@@ -3139,6 +3149,7 @@ impl<B: hal::Backend> Device<B> {
     }
 
     pub fn free_texture_storage(&mut self, texture: &mut Texture) {
+        println!("free_texture_storage {:?}", texture);
         debug_assert!(self.inside_frame);
         if texture.width + texture.height == 0 {
             return;
@@ -3153,9 +3164,12 @@ impl<B: hal::Backend> Device<B> {
     }
 
     pub fn free_image(&mut self, texture: &mut Texture) {
+        println!("free_image {:?}", texture);
         // Note: this is a very rare case, but if it becomes a problem
         // we need to handle this in renderer.rs
+        println!("current frame id {:?}", self.frame_id);
         if texture.still_in_flight(self.frame_id) {
+            println!("still_in_flight");
             self.wait_for_resources();
             let fence = self.device.create_fence(false);
             self.device.reset_fence(&fence);
@@ -3571,7 +3585,9 @@ impl<B: hal::Backend> Device<B> {
                     &vec![],
                 );
 
+                println!("clears={:?} rects={:?}", clears, rects);
                 encoder.clear_attachments(clears, rects);
+                println!("");
             }
             cmd_buffer.finish()
         };
@@ -3819,6 +3835,12 @@ impl<B: hal::Backend> Device<B> {
                 .submit(&self.upload_queue);
             self.queue_group.queues[0].submit(submission, Some(&mut self.frame_fence[self.next_id].inner));
             self.frame_fence[self.next_id].is_submitted = true;
+
+            if self.frame_fence[self.next_id].is_submitted {
+                self.device.wait_for_fence(&self.frame_fence[self.next_id].inner, !0);
+                self.device.reset_fence(&self.frame_fence[self.next_id].inner);
+                self.frame_fence[self.next_id].is_submitted = false;
+            }
 
             // present frame
             self.swap_chain

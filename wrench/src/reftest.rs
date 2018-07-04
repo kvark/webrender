@@ -343,7 +343,16 @@ impl<'a> ReftestHarness<'a> {
 
     fn run_reftest(&mut self, t: &Reftest) -> bool {
         println!("REFTEST {}", t);
-
+        //if t.test == PathBuf::from("reftests/border/border-no-bogus-line.yaml") {
+        //if t.test == PathBuf::from("reftests/border/border-image-fill.yaml") {
+        if true {
+            use std::thread;
+            use std::time::Duration;
+            println!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+            //thread::sleep(Duration::from_millis(4000));
+            //thread::sleep(Duration::from_millis(2000));
+            println!("###########################################");
+        }
         self.wrench
             .api
             .send_debug_cmd(

@@ -812,7 +812,7 @@ fn main() {
         "binary" => wrench::SaveType::Binary,
         _ => panic!("Save type must be json, ron, yaml, or binary")
     });
-    let size = args.value_of("size")
+    let mut size = args.value_of("size")
         .map(|s| if s == "720p" {
             DeviceUintSize::new(1280, 720)
         } else if s == "1080p" {
@@ -828,6 +828,8 @@ fn main() {
             DeviceUintSize::new(w, h)
         })
         .unwrap_or(DeviceUintSize::new(1920, 1080));
+    size.width /= 2;
+    size.height /= 2;
     let zoom_factor = args.value_of("zoom").map(|z| z.parse::<f32>().unwrap());
 
     let mut events_loop = if args.is_present("headless") {
