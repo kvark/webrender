@@ -4,8 +4,8 @@
 
 use api::{BorderRadius, DeviceIntPoint, DeviceIntRect, DeviceIntSize, DevicePixelScale};
 use api::{DevicePoint, DeviceRect, DeviceSize, LayoutPixel, LayoutPoint, LayoutRect, LayoutSize};
-use api::{WorldPixel, WorldPoint, WorldRect};
-use euclid::{Point2D, Rect, Size2D, TypedPoint2D, TypedRect, TypedSize2D};
+use api::{WorldPixel, WorldRect};
+use euclid::{Point2D, Rect, Size2D, TypedPoint2D, TypedRect, TypedScale, TypedSize2D};
 use euclid::{TypedTransform2D, TypedTransform3D, TypedVector2D, TypedVector3D};
 use euclid::{HomogeneousVector};
 use num_traits::Zero;
@@ -173,16 +173,18 @@ pub fn calculate_screen_bounding_rect(
     device_pixel_scale: DevicePixelScale,
     screen_bounds: Option<&DeviceIntRect>,
 ) -> Option<DeviceIntRect> {
-    debug!("rect {:?}", rect);
-    debug!("transform {:?}", transform);
-    debug!("screen_bounds: {:?}", screen_bounds);
     let homogens = [
         transform.transform_point2d_homogeneous(&rect.origin),
         transform.transform_point2d_homogeneous(&rect.top_right()),
         transform.transform_point2d_homogeneous(&rect.bottom_left()),
         transform.transform_point2d_homogeneous(&rect.bottom_right()),
     ];
-    debug!("homogeneous points {:?}", homogens);
+    if homogens.iter().any(|h| h.w <= 0.0) {
+        debug!("rect {:?}", rect);
+        debug!("transform {:?}", transform);
+        debug!("screen_bounds: {:?}", screen_bounds);
+        debug!("homogeneous points {:?}", homogens);
+    }
     let max_rect = match screen_bounds {
         Some(bounds) => bounds.to_f32(),
         None => DeviceRect::max_rect(),
@@ -192,48 +194,43 @@ pub fn calculate_screen_bounding_rect(
     // Otherwise, it will be clamped to the screen bounds anyway.
     let world_rect = if homogens.iter().any(|h| h.w <= 0.0) {
         let mut clipper = Clipper::new();
-        // using inverse-transpose of the inversed transform
         let t = transform.to_transform();
+
         // camera plane
-        {
-            let normal = TypedVector3D::new(t.m14, t.m24, t.m34);
-            let kf = 1.0 / normal.length();
-            clipper.add(Plane {
-                normal: normal * kf,
-                offset: t.m44 * kf,
-            });
-        }
+        //   (v * M).w > 0
+        //   dot(v, Mw) > 0
+        let mw = TypedVector3D::new(t.m14, t.m24, t.m34);
+        clipper.add(Plane::from_unnormalized(mw, t.m44));
 
-        // The equations for clip planes come from the following one:
-        // (v * M).x < right
-        // (v, Mx) < right
-        // (v, Mx) - right = 0;
+        // side planes
+        //   (v * M).x / (v * M).w > left
+        //   dot(v, Mx - left * Mw) > 0
+        //   (v * M).x / (v * M).w < right
+        //   dot(v, right * Mw - Mx) > 0
+        if let Some(bounds) = screen_bounds {
+            let mx = TypedVector3D::new(t.m11, t.m21, t.m31);
+            let left = bounds.origin.x as f32 / device_pixel_scale.0;
+            clipper.add(Plane::from_unnormalized(
+                mx - mw * TypedScale::new(left),
+                t.m41 - t.m44 * left,
+            ));
+            let right = (bounds.origin.x + bounds.size.width) as f32 / device_pixel_scale.0;
+            clipper.add(Plane::from_unnormalized(
+                mw * TypedScale::new(right) - mx,
+                t.m44 * right - t.m41,
+            ));
 
-        // left/right planes
-        if let Some(bounds) = screen_bounds {
-            let normal = TypedVector3D::new(t.m11, t.m21, t.m31);
-            let kf = 1.0 / normal.length();
-            clipper.add(Plane {
-                normal: normal * kf,
-                offset: t.m41 * kf - (bounds.origin.x) as f32 / device_pixel_scale.0,
-            });
-            clipper.add(Plane {
-                normal: normal * -kf,
-                offset: t.m41 * -kf + (bounds.origin.x + bounds.size.width) as f32 / device_pixel_scale.0,
-            });
-        }
-        // top/bottom planes
-        if let Some(bounds) = screen_bounds {
-            let normal = TypedVector3D::new(t.m12, t.m22, t.m32);
-            let kf = 1.0 / normal.length();
-            clipper.add(Plane {
-                normal: normal * kf,
-                offset: t.m42 * kf - (bounds.origin.y) as f32 / device_pixel_scale.0,
-            });
-            clipper.add(Plane {
-                normal: normal * -kf,
-                offset: t.m42 * -kf + (bounds.origin.y + bounds.size.height) as f32 / device_pixel_scale.0,
-            });
+            let my = TypedVector3D::new(t.m12, t.m22, t.m32);
+            let top = bounds.origin.y as f32 / device_pixel_scale.0;
+            clipper.add(Plane::from_unnormalized(
+                my - mw * TypedScale::new(top),
+                t.m42 - t.m44 * top,
+            ));
+            let bottom = (bounds.origin.y + bounds.size.height) as f32 / device_pixel_scale.0;
+            clipper.add(Plane::from_unnormalized(
+                mw * TypedScale::new(bottom) - my,
+                t.m44 * bottom - t.m42,
+            ));
         }
 
         let polygon = Polygon::from_points(
@@ -258,14 +255,10 @@ pub fn calculate_screen_bounding_rect(
             // filter out parts behind the view plane
             .flat_map(|poly| &poly.points)
             .map(|p| {
-                debug!("\tpoint {:?} -> {:?} -> {:?}", p,
-                    transform.transform_point2d_homogeneous(&p.to_2d()),
-                    transform.transform_point2d(&p.to_2d())
-                );
-                //TODO: change to `expect` when the near splitting code is ready
-                transform
-                    .transform_point2d(&p.to_2d())
-                    .unwrap_or(WorldPoint::zero())
+                let mut homo = transform.transform_point2d_homogeneous(&p.to_2d());
+                homo.w = homo.w.max(0.00000001); // avoid infinite values
+                debug!("\tpoint {:?} -> {:?} -> {:?}", p, homo, homo.to_point2d());
+                homo.to_point2d().expect("has to be in front hemisphere by now")
             })
         )
     } else {
@@ -278,54 +271,15 @@ pub fn calculate_screen_bounding_rect(
         ])
     };
 
-    debug!("world rect {:?}", world_rect);
-    (world_rect * device_pixel_scale)
-        .round_out()
-        .intersection(&max_rect)
-        .map(|r| r.to_i32())
-}
-
-pub fn _subtract_rect<U>(
-    rect: &TypedRect<f32, U>,
-    other: &TypedRect<f32, U>,
-    results: &mut Vec<TypedRect<f32, U>>,
-) {
-    results.clear();
-
-    let int = rect.intersection(other);
-    match int {
-        Some(int) => {
-            let rx0 = rect.origin.x;
-            let ry0 = rect.origin.y;
-            let rx1 = rx0 + rect.size.width;
-            let ry1 = ry0 + rect.size.height;
-
-            let ox0 = int.origin.x;
-            let oy0 = int.origin.y;
-            let ox1 = ox0 + int.size.width;
-            let oy1 = oy0 + int.size.height;
-
-            let r = TypedRect::from_untyped(&rect_from_points_f(rx0, ry0, ox0, ry1));
-            if r.size.width > 0.0 && r.size.height > 0.0 {
-                results.push(r);
-            }
-            let r = TypedRect::from_untyped(&rect_from_points_f(ox0, ry0, ox1, oy0));
-            if r.size.width > 0.0 && r.size.height > 0.0 {
-                results.push(r);
-            }
-            let r = TypedRect::from_untyped(&rect_from_points_f(ox0, oy1, ox1, ry1));
-            if r.size.width > 0.0 && r.size.height > 0.0 {
-                results.push(r);
-            }
-            let r = TypedRect::from_untyped(&rect_from_points_f(ox1, ry0, rx1, ry1));
-            if r.size.width > 0.0 && r.size.height > 0.0 {
-                results.push(r);
-            }
-        }
-        None => {
-            results.push(*rect);
-        }
+    let result = (world_rect * device_pixel_scale)
+         .round_out()
+         .intersection(&max_rect)
+         .map(|r| r.to_i32());
+    if homogens.iter().any(|h| h.w <= 0.0) {
+        debug!("world rect {:?}", world_rect);
+        debug!("result {:?}", result);
     }
+    result
 }
 
 #[repr(u32)]
