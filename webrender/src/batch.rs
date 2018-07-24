@@ -667,22 +667,47 @@ impl AlphaBatchBuilder {
                         // then don't add it to any batches here. Instead, create a polygon
                         // for it and add it to the current plane splitter.
                         if picture.is_in_3d_context {
+                            let near_split = true;
                             // Push into parent plane splitter.
                             debug_assert!(picture.surface.is_some());
-
                             let real_xf = &ctx
                                 .transforms
-                                .get_transform(picture.reference_frame_index);
-                            match make_polygon(
-                                picture.real_local_rect,
-                                &real_xf.m,
-                                prim_index.0,
-                            ) {
-                                Some(polygon) => splitter.add(polygon),
-                                None => {
-                                    // this shouldn't happen, the path will ultimately be
-                                    // turned into `expect` when the splitting code is fixed
-                                }
+                                .get_transform(picture.reference_frame_index)
+                                .m;
+
+                            if near_split {
+                                let bounds = (screen_rect.clipped.to_f32() / ctx.device_pixel_scale).to_f64();
+                                let mat = TypedTransform3D::row_major(
+                                    real_xf.m11 as f64,
+                                    real_xf.m12 as f64,
+                                    real_xf.m13 as f64,
+                                    real_xf.m14 as f64,
+                                    real_xf.m21 as f64,
+                                    real_xf.m22 as f64,
+                                    real_xf.m23 as f64,
+                                    real_xf.m24 as f64,
+                                    real_xf.m31 as f64,
+                                    real_xf.m32 as f64,
+                                    real_xf.m33 as f64,
+                                    real_xf.m34 as f64,
+                                    real_xf.m41 as f64,
+                                    real_xf.m42 as f64,
+                                    real_xf.m43 as f64,
+                                    real_xf.m44 as f64,
+                                );
+                                splitter.add_transformed_rect(
+                                    picture.real_local_rect.cast(),
+                                    mat,
+                                    bounds,
+                                    prim_index.0,
+                                );
+                            } else {
+                                let polygon = make_polygon(
+                                    picture.real_local_rect,
+                                    real_xf,
+                                    prim_index.0,
+                                ).unwrap();
+                                splitter.add(polygon);
                             }
 
                             return;
