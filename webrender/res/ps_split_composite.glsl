@@ -5,6 +5,9 @@
 #include shared,prim_shared
 
 varying vec3 vUv;
+varying vec2 vOffset;
+varying vec3 vWorldPos;
+varying vec2 vContentOrigin;
 flat varying vec4 vUvTaskBounds;
 flat varying vec4 vUvSampleBounds;
 
@@ -65,6 +68,14 @@ void main(void) {
                             geometry.points[3], geometry.points[2],
                             aPosition.y, aPosition.x);
     vec4 final_pos = vec4((world_pos.xy + dest_origin) * uDevicePixelRatio, ci.z, 1.0);
+
+    // extrude by 1 pixel in all directions
+    vec2 basis = vec2(geometry.points[1].x, geometry.points[3].y) - geometry.points[0].xy;
+    final_pos.xy += sign(basis) * (2.0 * aPosition.xy - 1.0);
+
+    vOffset = sign(basis) * (2.0 * aPosition.xy - 1.0);
+    vWorldPos = world_pos;
+    vContentOrigin = src_task.content_origin;
 
     gl_Position = uTransform * final_pos;
 
