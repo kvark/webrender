@@ -7,6 +7,7 @@ use webrender::api;
 
 fn bool_true() -> bool { true }
 fn bool_false() -> bool { false }
+fn usize_16() -> usize { 16 }
 fn yuv_color_space_709() -> api::YuvColorSpace { api::YuvColorSpace::Rec709 }
 
 pub type Document = HashMap<PipelineId, StackingContext>;
@@ -180,7 +181,26 @@ pub enum ItemKind {
         color_space: api::YuvColorSpace,
         kind: YuvKind,
     },
-    Text,
+    Text {
+        #[serde(default = "usize_16")]
+        size: usize,
+        #[serde(default = "Color::black")]
+        color: Color,
+        #[serde(default)]
+        bg_color: Option<Color>,
+        #[serde(default = "bool_false")]
+        synthetic_italics: bool,
+        #[serde(default = "bool_false")]
+        synthetic_bold: bool,
+        #[serde(default = "bool_false")]
+        embedded_bitmaps: bool,
+        #[serde(default = "bool_false")]
+        transpose: bool,
+        #[serde(default = "bool_false")]
+        flip_x: bool,
+        #[serde(default = "bool_false")]
+        flip_y: bool,
+    },
     ScrollFrame,
     StickyFrame,
     Clip,
