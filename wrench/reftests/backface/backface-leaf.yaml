@@ -1,3 +1,6 @@
+# In this test, the leaf green rectangle has only its back visible
+# due to rotate-x(180) transformation,
+# and "backface-visible = false", so it's completely hidden.
 ---
 root:
   items:
