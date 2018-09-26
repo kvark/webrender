@@ -822,12 +822,10 @@ impl<'a> DisplayListFlattener<'a> {
         spatial_node_index: SpatialNodeIndex,
         container: PrimitiveContainer,
     ) -> PrimitiveIndex {
-        let stacking_context = self.sc_stack.last().expect("bug: no stacking context!");
-
         self.prim_store.add_primitive(
             &info.rect,
             &info.clip_rect,
-            info.is_backface_visible && stacking_context.is_backface_visible,
+            info.is_backface_visible,
             clip_chain_id,
             spatial_node_index,
             info.tag,
@@ -1035,7 +1033,7 @@ impl<'a> DisplayListFlattener<'a> {
         let leaf_prim_index = self.prim_store.add_primitive(
             &LayoutRect::zero(),
             &max_clip,
-            true,
+            is_backface_visible,
             clip_chain_id,
             spatial_node_index,
             None,
@@ -1045,6 +1043,10 @@ impl<'a> DisplayListFlattener<'a> {
         // Create a chain of pictures based on presence of filters,
         // mix-blend-mode and/or 3d rendering context containers.
         let mut current_prim_index = leaf_prim_index;
+
+        if cfg!(debug_assertions) && Some(current_prim_index) == self.prim_store.chase_id {
+            println!("\tis a leaf primitive for a stacking context");
+        }
 
         // For each filter, create a new image with that composite mode.
         for filter in &composite_ops.filters {
@@ -1066,12 +1068,16 @@ impl<'a> DisplayListFlattener<'a> {
             current_prim_index = self.prim_store.add_primitive(
                 &LayoutRect::zero(),
                 &max_clip,
-                true,
+                is_backface_visible,
                 clip_chain_id,
                 spatial_node_index,
                 None,
                 PrimitiveContainer::Brush(filter_prim),
             );
+
+            if cfg!(debug_assertions) && Some(current_prim_index) == self.prim_store.chase_id {
+                println!("\tis a composite picture for a stacking context with {:?}", filter);
+            }
         }
 
         // Same for mix-blend-mode.
@@ -1092,12 +1098,17 @@ impl<'a> DisplayListFlattener<'a> {
             current_prim_index = self.prim_store.add_primitive(
                 &LayoutRect::zero(),
                 &max_clip,
-                true,
+                is_backface_visible,
                 clip_chain_id,
                 spatial_node_index,
                 None,
+
                 PrimitiveContainer::Brush(blend_prim),
             );
+
+            if cfg!(debug_assertions) && Some(current_prim_index) == self.prim_store.chase_id {
+                println!("\tis a mix-blend picture for a stacking context with {:?}", mix_blend_mode);
+            }
         }
 
         if establishes_3d_context {
@@ -1120,34 +1131,21 @@ impl<'a> DisplayListFlattener<'a> {
             current_prim_index = self.prim_store.add_primitive(
                 &LayoutRect::zero(),
                 &max_clip,
-                true,
+                is_backface_visible,
                 clip_chain_id,
                 spatial_node_index,
                 None,
                 PrimitiveContainer::Brush(container_prim),
             );
+
+            if cfg!(debug_assertions) && Some(current_prim_index) == self.prim_store.chase_id {
+                println!("\tis a 3D context picture for a stacking context");
+            }
         }
-
-        // preserve-3d's semantics are to hoist all your children to be your siblings
-        // when doing backface-visibility checking, so we need to grab the backface-visibility
-        // of the lowest ancestor which *doesn't* preserve-3d, and AND it in with ours.
-        //
-        // No this isn't obvious or clear, it's just what we worked out over a day of testing.
-        // There's probably a bug in here, but I couldn't find it with the examples and tests
-        // at my disposal!
-        let ancestor_is_backface_visible =
-            self.sc_stack
-                .iter()
-                .rfind(|sc| sc.transform_style == TransformStyle::Flat)
-                .map(|sc| sc.is_backface_visible)
-                .unwrap_or(is_backface_visible);
-
-        let is_backface_visible = is_backface_visible && ancestor_is_backface_visible;
 
         // Push the SC onto the stack, so we know how to handle things in
         // pop_stacking_context.
         let sc = FlattenedStackingContext {
-            is_backface_visible,
             pipeline_id,
             transform_style,
             establishes_3d_context,
@@ -2050,9 +2048,6 @@ impl<'a> DisplayListFlattener<'a> {
 struct FlattenedStackingContext {
     /// Pipeline this stacking context belongs to.
     pipeline_id: PipelineId,
-
-    /// If true, visible when backface is visible.
-    is_backface_visible: bool,
 
     /// CSS transform-style property.
     transform_style: TransformStyle,

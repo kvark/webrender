@@ -76,6 +76,12 @@ impl PrimitiveOpacity {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub enum VisibleFace {
+    Front,
+    Back,
+}
+
 #[derive(Debug)]
 pub enum CoordinateSpaceMapping<F, T> {
     Local,
@@ -193,6 +199,20 @@ impl<F, T> SpaceMapper<F, T> where F: fmt::Debug {
                         warn!("parent relative transform can't transform the primitive rect for {:?}", rect);
                         None
                     }
+                }
+            }
+        }
+    }
+
+    pub fn visible_face(&self) -> VisibleFace {
+        match self.kind {
+            CoordinateSpaceMapping::Local => VisibleFace::Front,
+            CoordinateSpaceMapping::ScaleOffset(_) => VisibleFace::Front,
+            CoordinateSpaceMapping::Transform(ref transform) => {
+                if transform.is_backface_visible() {
+                    VisibleFace::Back
+                } else {
+                    VisibleFace::Front
                 }
             }
         }
@@ -1875,14 +1895,29 @@ impl PrimitiveStore {
                 spatial_node_index,
             );
 
+            // Mark whether this picture contains any complex coordinate
+            // systems, due to either the scroll node or the clip-chain.
+            pic_state.has_non_root_coord_system |=
+                spatial_node.coordinate_system_id != CoordinateSystemId::root();
+
+            pic_state.map_local_to_pic.set_target_spatial_node(
+                spatial_node_index,
+                frame_context.clip_scroll_tree,
+            );
+
             // Do some basic checks first, that can early out
             // without even knowing the local rect.
-            if !is_backface_visible && spatial_node.world_content_transform.is_backface_visible() {
-                if cfg!(debug_assertions) && is_chased {
-                    println!("\tculled for not having visible back faces");
+            match pic_state.map_local_to_pic.visible_face() {
+                VisibleFace::Back if !is_backface_visible => {
+                    if cfg!(debug_assertions) && is_chased {
+                        println!("\tculled for not having visible back faces");
+                    }
+                    continue;
                 }
-                continue;
+                _ => {}
             }
+
+
 
             if !spatial_node.invertible {
                 if cfg!(debug_assertions) && is_chased {
