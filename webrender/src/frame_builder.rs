@@ -86,6 +86,7 @@ pub struct FrameBuildingState<'a> {
     pub segment_builder: SegmentBuilder,
 }
 
+#[derive(Debug)]
 pub struct PictureContext {
     pub pipeline_id: PipelineId,
     pub apply_local_clip_rect: bool,
@@ -105,6 +106,7 @@ pub struct PictureState {
     pub map_pic_to_world: SpaceMapper<PicturePixel, WorldPixel>,
     pub map_pic_to_raster: SpaceMapper<PicturePixel, RasterPixel>,
     pub map_raster_to_world: SpaceMapper<RasterPixel, WorldPixel>,
+    pub map_local_to_containing_block: SpaceMapper<LayoutPixel, LayoutPixel>,
     pub surface_spatial_node_index: SpatialNodeIndex,
     pub raster_spatial_node_index: SpatialNodeIndex,
 }

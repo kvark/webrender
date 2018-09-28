@@ -29,7 +29,7 @@ use render_task::{RenderTaskCacheKeyKind, RenderTaskId, RenderTaskCacheEntryHand
 use renderer::{MAX_VERTEX_TEXTURE_WIDTH};
 use resource_cache::{ImageProperties, ImageRequest, ResourceCache};
 use scene::SceneProperties;
-use std::{cmp, fmt, mem, usize};
+use std::{cmp, fmt, mem, ops, usize};
 use util::{ScaleOffset, MatrixHelpers, pack_as_float, project_rect, raster_rect_to_device_pixels};
 use smallvec::SmallVec;
 
@@ -80,6 +80,16 @@ impl PrimitiveOpacity {
 pub enum VisibleFace {
     Front,
     Back,
+}
+
+impl ops::Not for VisibleFace {
+    type Output = Self;
+    fn not(self) -> Self {
+        match self {
+            VisibleFace::Front => VisibleFace::Back,
+            VisibleFace::Back => VisibleFace::Front,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1413,6 +1423,10 @@ impl PrimitiveStore {
         self.primitives[index.0].as_pic_mut()
     }
 
+    pub fn get_spatial_node_index(&self, index: PrimitiveIndex) -> SpatialNodeIndex {
+        self.primitives[index.0].metadata.spatial_node_index
+    }
+
     pub fn add_primitive(
         &mut self,
         local_rect: &LayoutRect,
@@ -1883,31 +1897,14 @@ impl PrimitiveStore {
                 (prim.metadata.spatial_node_index, prim.metadata.is_backface_visible)
             };
 
-            let spatial_node = &frame_context
-                .clip_scroll_tree
-                .spatial_nodes[spatial_node_index.0];
-
-            // TODO(gw): Although constructing these is cheap, they are often
-            //           the same for many consecutive primitives, so it may
-            //           be worth caching the most recent context.
-            let prim_context = PrimitiveContext::new(
-                spatial_node,
-                spatial_node_index,
-            );
-
-            // Mark whether this picture contains any complex coordinate
-            // systems, due to either the scroll node or the clip-chain.
-            pic_state.has_non_root_coord_system |=
-                spatial_node.coordinate_system_id != CoordinateSystemId::root();
-
-            pic_state.map_local_to_pic.set_target_spatial_node(
+            pic_state.map_local_to_containing_block.set_target_spatial_node(
                 spatial_node_index,
                 frame_context.clip_scroll_tree,
             );
 
             // Do some basic checks first, that can early out
             // without even knowing the local rect.
-            match pic_state.map_local_to_pic.visible_face() {
+            match pic_state.map_local_to_containing_block.visible_face() {
                 VisibleFace::Back if !is_backface_visible => {
                     if cfg!(debug_assertions) && is_chased {
                         println!("\tculled for not having visible back faces");
@@ -1917,7 +1914,17 @@ impl PrimitiveStore {
                 _ => {}
             }
 
+            if cfg!(debug_assertions) && is_chased && !is_backface_visible {
+                println!("\tprim {:?} with property {} is not culled for visible face {:?}, transform {:?}",
+                    prim_index, is_backface_visible,
+                    pic_state.map_local_to_containing_block.visible_face(),
+                    pic_state.map_local_to_containing_block);
+                println!("\tpicture context {:?}", pic_context);
+            }
 
+            let spatial_node = &frame_context
+                .clip_scroll_tree
+                .spatial_nodes[spatial_node_index.0];
 
             if !spatial_node.invertible {
                 if cfg!(debug_assertions) && is_chased {
@@ -1926,14 +1933,22 @@ impl PrimitiveStore {
                 continue;
             }
 
+            pic_state.map_local_to_pic.set_target_spatial_node(
+                spatial_node_index,
+                frame_context.clip_scroll_tree,
+            );
+
             // Mark whether this picture contains any complex coordinate
             // systems, due to either the scroll node or the clip-chain.
             pic_state.has_non_root_coord_system |=
                 spatial_node.coordinate_system_id != CoordinateSystemId::root();
 
-            pic_state.map_local_to_pic.set_target_spatial_node(
+            // TODO(gw): Although constructing these is cheap, they are often
+            //           the same for many consecutive primitives, so it may
+            //           be worth caching the most recent context.
+            let prim_context = PrimitiveContext::new(
+                spatial_node,
                 spatial_node_index,
-                frame_context.clip_scroll_tree,
             );
 
             if self.prepare_prim_for_render(

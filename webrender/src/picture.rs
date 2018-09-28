@@ -154,6 +154,22 @@ pub struct PictureCacheKey {
     unclipped_size: DeviceIntSize,
 }
 
+/// Enum value describing the place of a picture in a 3D context.
+#[derive(Debug)]
+pub enum Picture3DContext {
+    /// The picture is not a part of 3D context sub-hierarchy.
+    Out,
+    /// The picture is a part of 3D context.
+    In {
+        /// The spatial node index of an "ancestor" element, i.e. one
+        /// that establishes the transformed element’s containing block.
+        ///
+        /// See CSS spec draft for more details:
+        /// https://drafts.csswg.org/css-transforms-2/#accumulated-3d-transformation-matrix-computation
+        ancestor_index: SpatialNodeIndex,
+    }
+}
+
 #[derive(Debug)]
 pub struct PicturePrimitive {
     // List of primitive runs that make up this picture.
@@ -182,8 +198,8 @@ pub struct PicturePrimitive {
     pub requested_raster_space: RasterSpace,
 
     pub raster_config: Option<RasterConfig>,
-    // If true, this picture is part of a 3D context.
-    pub is_in_3d_context: bool,
+    pub context_3d: Picture3DContext,
+
     // If requested as a frame output (for rendering
     // pages to a texture), this is the pipeline this
     // picture is the root of.
@@ -217,7 +233,7 @@ impl PicturePrimitive {
     pub fn new_image(
         id: PictureId,
         requested_composite_mode: Option<PictureCompositeMode>,
-        is_in_3d_context: bool,
+        context_3d: Picture3DContext,
         pipeline_id: PipelineId,
         frame_output_pipeline_id: Option<PipelineId>,
         apply_local_clip_rect: bool,
@@ -229,7 +245,7 @@ impl PicturePrimitive {
             secondary_render_task_id: None,
             requested_composite_mode,
             raster_config: None,
-            is_in_3d_context,
+            context_3d,
             frame_output_pipeline_id,
             extra_gpu_data_handle: GpuCacheHandle::new(),
             apply_local_clip_rect,
@@ -318,6 +334,15 @@ impl PicturePrimitive {
             frame_context,
         );
 
+        let containing_node_index = match self.context_3d {
+            Picture3DContext::Out => surface_spatial_node_index,
+            Picture3DContext::In { ancestor_index } => ancestor_index,
+        };
+        let map_local_to_containing_block = SpaceMapper::new(
+            containing_node_index,
+            LayoutRect::zero(), // bounds aren't going to be used for this mapping
+        );
+
         self.raster_config = actual_composite_mode.map(|composite_mode| {
             RasterConfig {
                 composite_mode,
@@ -337,6 +362,7 @@ impl PicturePrimitive {
             map_pic_to_world,
             map_pic_to_raster,
             map_raster_to_world,
+            map_local_to_containing_block,
         };
 
         // Disallow subpixel AA if an intermediate surface is needed.

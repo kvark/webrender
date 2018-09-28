@@ -14,7 +14,7 @@ use api::{PropertyBinding, ReferenceFrame, RepeatMode, ScrollFrameDisplayItem, S
 use api::{Shadow, SpecificDisplayItem, StackingContext, StickyFrameDisplayItem, TexelRect};
 use api::{ClipMode, TransformStyle, YuvColorSpace, YuvData};
 use clip::{ClipChainId, ClipRegion, ClipItemKey, ClipStore};
-use clip_scroll_tree::{ClipScrollTree, SpatialNodeIndex};
+use clip_scroll_tree::{ROOT_SPATIAL_NODE_INDEX, ClipScrollTree, SpatialNodeIndex};
 use euclid::vec2;
 use frame_builder::{ChasePrimitive, FrameBuilder, FrameBuilderConfig};
 use glyph_rasterizer::FontInstance;
@@ -23,7 +23,7 @@ use gpu_types::BrushFlags;
 use hit_test::{HitTestingItem, HitTestingRun};
 use image::simplify_repeated_primitive;
 use internal_types::{FastHashMap, FastHashSet};
-use picture::{PictureCompositeMode, PictureIdGenerator, PicturePrimitive};
+use picture::{Picture3DContext, PictureCompositeMode, PictureIdGenerator, PicturePrimitive};
 use prim_store::{BrushKind, BrushPrimitive, BrushSegmentDescriptor};
 use prim_store::{EdgeAaSegmentMask, ImageSource, PrimitiveOpacity};
 use prim_store::{BorderSource, BrushSegment, BrushSegmentVec, PrimitiveContainer, PrimitiveIndex, PrimitiveStore};
@@ -1015,11 +1015,44 @@ impl<'a> DisplayListFlattener<'a> {
             composite_mode = Some(PictureCompositeMode::Blit);
         }
 
+        // Find the spatial node index of the containing block, which
+        // defines the context of backface-visibility.
+        let last_leaf_prim_index = self.sc_stack.last().map(|sc| sc.leaf_prim_index);
+        // Note: the logic of obtaining these elements diverge upon the
+        // `establishes_3d_context` flag, but both try to find the parent 3D context,
+        // so we try to unity these code paths.
+        let (context_3d, parent_prim_index) = if participating_in_3d_context {
+            // If we're in a 3D context, we will parent the picture
+            // to the first stacking context we find that is a
+            // 3D rendering context container. This follows the spec
+            // by hoisting these items out into the same 3D context
+            // for plane splitting.
+            let parent = self.sc_stack
+                .iter()
+                .rfind(|sc| sc.establishes_3d_context);
+            let context_3d = Picture3DContext::In {
+                ancestor_index: match parent {
+                    Some(sc) => self.prim_store.get_spatial_node_index(sc.leaf_prim_index),
+                    None => ROOT_SPATIAL_NODE_INDEX,
+                },
+            };
+            let parent_prim_index = if establishes_3d_context {
+                last_leaf_prim_index
+            } else {
+                parent.map(|sc| sc.root_prim_index)
+            };
+            info!("SC in {:?} is participating in 3D context", pipeline_id);
+            info!("\testablishes={}, 3d={:?}, parent = {:?}", establishes_3d_context, context_3d, parent_prim_index);
+            (context_3d, parent_prim_index)
+        } else {
+            (Picture3DContext::Out, last_leaf_prim_index)
+        };
+
         // Add picture for this actual stacking context contents to render into.
         let leaf_picture = PicturePrimitive::new_image(
             self.picture_id_generator.next(),
             composite_mode,
-            participating_in_3d_context,
+            context_3d,
             pipeline_id,
             frame_output_pipeline_id,
             true,
@@ -1055,7 +1088,7 @@ impl<'a> DisplayListFlattener<'a> {
             let mut filter_picture = PicturePrimitive::new_image(
                 self.picture_id_generator.next(),
                 Some(PictureCompositeMode::Filter(filter)),
-                false,
+                Picture3DContext::Out,
                 pipeline_id,
                 None,
                 true,
@@ -1085,7 +1118,7 @@ impl<'a> DisplayListFlattener<'a> {
             let mut blend_picture = PicturePrimitive::new_image(
                 self.picture_id_generator.next(),
                 Some(PictureCompositeMode::MixBlend(mix_blend_mode)),
-                false,
+                Picture3DContext::Out,
                 pipeline_id,
                 None,
                 true,
@@ -1118,7 +1151,7 @@ impl<'a> DisplayListFlattener<'a> {
             let mut container_picture = PicturePrimitive::new_image(
                 self.picture_id_generator.next(),
                 None,
-                false,
+                Picture3DContext::Out,
                 pipeline_id,
                 None,
                 true,
@@ -1149,10 +1182,10 @@ impl<'a> DisplayListFlattener<'a> {
             pipeline_id,
             transform_style,
             establishes_3d_context,
-            participating_in_3d_context,
             leaf_prim_index,
             root_prim_index: current_prim_index,
             has_mix_blend_mode: composite_ops.mix_blend_mode.is_some(),
+            parent_prim_index,
         };
 
         self.sc_stack.push(sc);
@@ -1169,28 +1202,10 @@ impl<'a> DisplayListFlattener<'a> {
             self.prim_store.optimize_picture_if_possible(prim_index);
         }
 
-        if self.sc_stack.is_empty() {
-            // This must be the root stacking context
-            return;
-        }
-
-        let parent_prim_index = if !sc.establishes_3d_context && sc.participating_in_3d_context {
-            // If we're in a 3D context, we will parent the picture
-            // to the first stacking context we find that is a
-            // 3D rendering context container. This follows the spec
-            // by hoisting these items out into the same 3D context
-            // for plane splitting.
-            self.sc_stack
-                .iter()
-                .rev()
-                .find(|sc| sc.establishes_3d_context)
-                .map(|sc| sc.root_prim_index)
-                .unwrap()
-        } else {
-            self.sc_stack.last().unwrap().leaf_prim_index
+        let parent_pic = match sc.parent_prim_index {
+            Some(prim_index) => self.prim_store.get_pic_mut(prim_index),
+            None => return, // This must be the root stacking context
         };
-
-        let parent_pic = self.prim_store.get_pic_mut(parent_prim_index);
         parent_pic.add_primitive(sc.root_prim_index);
 
         // If we have a mix-blend-mode, and we aren't the primary framebuffer,
@@ -1431,7 +1446,7 @@ impl<'a> DisplayListFlattener<'a> {
         let shadow_pic = PicturePrimitive::new_image(
             self.picture_id_generator.next(),
             Some(PictureCompositeMode::Filter(blur_filter)),
-            false,
+            Picture3DContext::Out,
             pipeline_id,
             None,
             is_passthrough,
@@ -2058,6 +2073,7 @@ struct FlattenedStackingContext {
     /// If true, this stacking context establishes a new
     /// 3d rendering context.
     establishes_3d_context: bool,
-    participating_in_3d_context: bool,
     has_mix_blend_mode: bool,
+
+    parent_prim_index: Option<PrimitiveIndex>,
 }
