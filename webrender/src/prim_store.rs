@@ -1907,7 +1907,8 @@ impl PrimitiveStore {
             match pic_state.map_local_to_containing_block.visible_face() {
                 VisibleFace::Back if !is_backface_visible => {
                     if cfg!(debug_assertions) && is_chased {
-                        println!("\tculled for not having visible back faces");
+                        println!("\tculled for not having visible back faces, transform {:?}",
+                            pic_state.map_local_to_containing_block);
                     }
                     continue;
                 }

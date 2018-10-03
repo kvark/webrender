@@ -1017,35 +1017,35 @@ impl<'a> DisplayListFlattener<'a> {
 
         // Find the spatial node index of the containing block, which
         // defines the context of backface-visibility.
-        let last_leaf_prim_index = self.sc_stack.last().map(|sc| sc.leaf_prim_index);
-        // Note: the logic of obtaining these elements diverge upon the
-        // `establishes_3d_context` flag, but both try to find the parent 3D context,
-        // so we try to unity these code paths.
-        let (context_3d, parent_prim_index) = if participating_in_3d_context {
+        let context_3d = if participating_in_3d_context {
+            let ancestor_context = self.sc_stack
+                .iter()
+                .rfind(|sc| sc.transform_style == TransformStyle::Flat);
+            Picture3DContext::In {
+                ancestor_index: match ancestor_context {
+                    Some(sc) => self.prim_store.get_spatial_node_index(sc.leaf_prim_index),
+                    None => ROOT_SPATIAL_NODE_INDEX,
+                }
+            }
+        } else {
+            Picture3DContext::Out
+        };
+
+        // Find the owning primitive.
+        let parent_prim_index = if participating_in_3d_context && !establishes_3d_context {
             // If we're in a 3D context, we will parent the picture
             // to the first stacking context we find that is a
             // 3D rendering context container. This follows the spec
             // by hoisting these items out into the same 3D context
             // for plane splitting.
-            let parent = self.sc_stack
+            self.sc_stack
                 .iter()
-                .rfind(|sc| sc.establishes_3d_context);
-            let context_3d = Picture3DContext::In {
-                ancestor_index: match parent {
-                    Some(sc) => self.prim_store.get_spatial_node_index(sc.leaf_prim_index),
-                    None => ROOT_SPATIAL_NODE_INDEX,
-                },
-            };
-            let parent_prim_index = if establishes_3d_context {
-                last_leaf_prim_index
-            } else {
-                parent.map(|sc| sc.root_prim_index)
-            };
-            info!("SC in {:?} is participating in 3D context", pipeline_id);
-            info!("\testablishes={}, 3d={:?}, parent = {:?}", establishes_3d_context, context_3d, parent_prim_index);
-            (context_3d, parent_prim_index)
+                .rfind(|sc| sc.establishes_3d_context)
+                .map(|sc| sc.root_prim_index)
         } else {
-            (Picture3DContext::Out, last_leaf_prim_index)
+            self.sc_stack
+                .last()
+                .map(|sc| sc.leaf_prim_index)
         };
 
         // Add picture for this actual stacking context contents to render into.
