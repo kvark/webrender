@@ -1679,12 +1679,9 @@ impl PrimitiveStore {
                     &mut pic_rect,
                 );
 
-                let pic_rect = if is_passthrough {
+                if is_passthrough {
                     *current_pic_rect = current_pic_rect.union(&pic_rect);
-                    None
-                } else {
-                    Some(pic_rect)
-                };
+                }
 
                 if !pic_state_for_children.is_cacheable {
                   pic_state.is_cacheable = false;
@@ -1698,7 +1695,7 @@ impl PrimitiveStore {
                         prim_instances,
                         pic_context_for_children,
                         pic_state_for_children,
-                        pic_rect,
+                        Some(pic_rect),
                         frame_state,
                     );
 
@@ -1723,6 +1720,7 @@ impl PrimitiveStore {
 
         if is_passthrough {
             prim.metadata.clipped_world_rect = Some(pic_state.map_pic_to_world.bounds);
+            prim_instance.combined_local_clip_rect = prim.metadata.local_clip_rect;
         } else {
             if prim.metadata.local_rect.size.width <= 0.0 ||
                prim.metadata.local_rect.size.height <= 0.0 {

@@ -15,7 +15,7 @@ use gpu_types::{ClipMaskInstance, SplitCompositeInstance};
 use gpu_types::{PrimitiveInstanceData, RasterizationSpace, GlyphInstance};
 use gpu_types::{PrimitiveHeader, PrimitiveHeaderIndex, TransformPaletteId, TransformPalette};
 use internal_types::{FastHashMap, SavedTargetIndex, SourceTexture};
-use picture::{Picture3DContext, PictureCompositeMode, PicturePrimitive, PictureSurface};
+use picture::{Picture3DContext, PictureCompositeMode, PicturePrimitive, PictureSurface, RasterConfig};
 use plane_split::{BspSplitter, Clipper, Polygon, Splitter};
 use prim_store::{BrushKind, BrushPrimitive, BrushSegmentTaskId, DeferredResolve};
 use prim_store::{EdgeAaSegmentMask, ImageSource};
@@ -448,6 +448,7 @@ impl AlphaBatchBuilder {
         // Even though most of the time a splitter isn't used or needed,
         // they are cheap to construct so we will always pass one down.
         let mut splitter = BspSplitter::new();
+        info!("Adding stuff for {:?}...", task_id); //TEMP
 
         // Add each run in this picture to the batch.
         for (plane_split_anchor, prim_instance) in pic.prim_instances.iter().enumerate() {
@@ -467,16 +468,36 @@ impl AlphaBatchBuilder {
             );
         }
 
+        if splitter.is_empty() {
+            return;
+        }
+
+        let root_pic_resolve = ctx.prim_store
+            .get_pic(pic.prim_instances[0].prim_index)
+            .raster_config
+            .as_ref()
+            .expect("BUG: no raster config")
+            .surface
+            .as_ref()
+            .expect("BUG: no surface")
+            .resolve(
+                render_tasks,
+                ctx.resource_cache,
+                gpu_cache,
+            );
+
         // Flush the accumulated plane splits onto the task tree.
         // Z axis is directed at the screen, `sort` is ascending, and we need back-to-front order.
+        info!("Sorting..."); //TEMP
         for poly in splitter.sort(vec3(0.0, 0.0, 1.0)) {
+            info!("\tgot {:?}", poly); //TEMP
             let prim_instance = &pic.prim_instances[poly.anchor];
             let prim_index = prim_instance.prim_index;
             let pic_metadata = &ctx.prim_store.primitives[prim_index.0].metadata;
             if cfg!(debug_assertions) && ctx.prim_store.chase_id == Some(prim_index) {
                 println!("\t\tsplit polygon {:?}", poly.points);
             }
-            let transform = transforms.get_world_transform(pic_metadata.spatial_node_index).inverse().unwrap();
+            let transform = transforms.get_world_inv_transform(pic_metadata.spatial_node_index);
             let transform_id = transforms.get_id(
                 pic_metadata.spatial_node_index,
                 ROOT_SPATIAL_NODE_INDEX,
@@ -498,18 +519,20 @@ impl AlphaBatchBuilder {
 
             let pic = ctx.prim_store.get_pic(prim_index);
 
-            let (uv_rect_address, _) = pic
-                .raster_config
-                .as_ref()
-                .expect("BUG: no raster config")
-                .surface
-                .as_ref()
-                .expect("BUG: no surface")
-                .resolve(
-                    render_tasks,
-                    ctx.resource_cache,
-                    gpu_cache,
-                );
+            // if a picture doesn't have it's own rasterizer config,
+            // it was rasterized in to the root surface of 3D hierarchy
+            // for having a 2D only transformation.
+            let (uv_rect_address, _) = match pic.raster_config {
+                Some(RasterConfig { surface: Some(ref surface), .. }) => {
+                    surface.resolve(
+                        render_tasks,
+                        ctx.resource_cache,
+                        gpu_cache,
+                    )
+                },
+                Some(_) => panic!("Expected rasterizer config with a sufrace"),
+                None => root_pic_resolve,
+            };
 
             let prim_header_index = prim_headers.push(&prim_header, [
                 uv_rect_address.as_int(),
@@ -655,7 +678,7 @@ impl AlphaBatchBuilder {
                         // for it and add it to the current plane splitter.
                         if let Picture3DContext::In { .. } = picture.context_3d {
                             // Push into parent plane splitter.
-                            debug_assert!(picture.raster_config.is_some());
+                            //debug_assert!(picture.raster_config.is_some());
                             let transform = transforms.get_world_transform(prim_metadata.spatial_node_index);
 
                             // Apply the local clip rect here, before splitting. This is
@@ -664,8 +687,20 @@ impl AlphaBatchBuilder {
                             // rather that rectangles. The interpolation still works correctly
                             // since we determine the UVs by doing a bilerp with a factor
                             // from the original local rect.
+                            info!("\tprim local {:?}, combined {:?}",
+                                prim_metadata.local_rect,
+                                prim_instance.combined_local_clip_rect,
+                            );
                             let local_rect = prim_metadata.local_rect
-                                                          .intersection(&prim_instance.combined_local_clip_rect);
+                                .intersection(&prim_instance.combined_local_clip_rect);
+
+                            info!("\tadding picture {:?} with local rect {:?} at {:?} with {:?} of {:?}",
+                                prim_instance.prim_index,
+                                local_rect,
+                                prim_metadata.spatial_node_index,
+                                transform,
+                                transform.transform_kind(),
+                            );
 
                             if let Some(local_rect) = local_rect {
                                 match transform.transform_kind() {
@@ -697,9 +732,13 @@ impl AlphaBatchBuilder {
                                         }
                                     }
                                 }
+                                return;
                             }
 
-                            return;
+                            if picture.raster_config.is_some() {
+                                // don't break if this picture is passthrough
+                                return;
+                            }
                         }
 
                         match picture.raster_config {

@@ -108,10 +108,11 @@ impl ClipScrollTree {
         }
     }
 
-    /// Calculate the relative transform from `ref_node_index`
-    /// to `target_node_index`. It's assumed that `ref_node_index`
-    /// is a parent of `target_node_index`. This method will
+    /// Calculate the relative transform from `from_node_index`
+    /// to `to_node_index`. It's assumed that `from_node_index`
+    /// is a parent of `to_node_index`. This method will
     /// panic if that invariant isn't true!
+    //TODO: don't panic, return Result
     pub fn get_relative_transform(
         &self,
         from_node_index: SpatialNodeIndex,

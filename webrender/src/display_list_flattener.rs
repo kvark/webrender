@@ -35,7 +35,7 @@ use scene_builder::DocumentResources;
 use spatial_node::{SpatialNodeType, StickyFrameInfo};
 use std::{f32, mem};
 use tiling::{CompositeOps};
-use util::{MaxRect, RectHelpers};
+use util::{MatrixHelpers, MaxRect, RectHelpers};
 
 #[derive(Debug, Copy, Clone)]
 struct ClipNode {
@@ -935,6 +935,10 @@ impl<'a> DisplayListFlattener<'a> {
             self.add_primitive_to_draw_list(
                 prim_index,
             );
+        } else {
+            if cfg!(debug_assertions) && ChasePrimitive::LocalRect(info.rect) == self.config.chase_primitive {
+                println!("Chased primitive belongs to an invisible container");
+            }
         }
     }
 
@@ -1004,7 +1008,17 @@ impl<'a> DisplayListFlattener<'a> {
         // has a clip node. In the future, we may decide during
         // prepare step to skip the intermediate surface if the
         // clip node doesn't affect the stacking context rect.
-        if participating_in_3d_context || clipping_node.is_some() {
+        let is_axis_aligned = self.clip_scroll_tree
+            .get_relative_transform(
+                self.sc_stack.last().map(|sc| sc.spatial_node_index).unwrap_or(ROOT_SPATIAL_NODE_INDEX),
+                spatial_node_index
+            )
+            .map(|t| t.preserves_2d_axis_alignment())
+            .unwrap_or(false);
+        if establishes_3d_context ||
+            (participating_in_3d_context && !is_axis_aligned) ||
+            clipping_node.is_some()
+        {
             // TODO(gw): For now, as soon as this picture is in
             //           a 3D context, we draw it to an intermediate
             //           surface and apply plane splitting. However,
@@ -1012,6 +1026,7 @@ impl<'a> DisplayListFlattener<'a> {
             //           During culling, we can check if there is actually
             //           perspective present, and skip the plane splitting
             //           completely when that is not the case.
+            // TODO(kvark): the comment is rather outdated ^^^
             composite_mode = Some(PictureCompositeMode::Blit);
         }
 
@@ -1029,23 +1044,6 @@ impl<'a> DisplayListFlattener<'a> {
             }
         } else {
             Picture3DContext::Out
-        };
-
-        // Find the owning primitive.
-        let parent_prim_index = if participating_in_3d_context && !establishes_3d_context {
-            // If we're in a 3D context, we will parent the picture
-            // to the first stacking context we find that is a
-            // 3D rendering context container. This follows the spec
-            // by hoisting these items out into the same 3D context
-            // for plane splitting.
-            self.sc_stack
-                .iter()
-                .rfind(|sc| sc.establishes_3d_context)
-                .map(|sc| sc.root_prim_index)
-        } else {
-            self.sc_stack
-                .last()
-                .map(|sc| sc.leaf_prim_index)
         };
 
         // Add picture for this actual stacking context contents to render into.
@@ -1176,6 +1174,37 @@ impl<'a> DisplayListFlattener<'a> {
             }
         }
 
+        // Find the owning primitive and add our leaf to it.
+        let parent_prim_index = if participating_in_3d_context && !establishes_3d_context {
+            // If we're in a 3D context, we will parent the picture
+            // to the first stacking context we find that is a
+            // 3D rendering context container. This follows the spec
+            // by hoisting these items out into the same 3D context
+            // for plane splitting.
+            self.sc_stack
+                .iter()
+                .rfind(|sc| sc.establishes_3d_context)
+                .map(|sc| sc.root_prim_index)
+        } else {
+            self.sc_stack
+                .last()
+                .map(|sc| sc.leaf_prim_index)
+        };
+        if let Some(parent_index) = parent_prim_index {
+            let parent_pic = self.prim_store.get_pic_mut(parent_index);
+            parent_pic.add_primitive(current_prim_index);
+            // If we have a mix-blend-mode, and we aren't the primary framebuffer,
+            // the stacking context needs to be isolated to blend correctly as per
+            // the CSS spec.
+            // If not already isolated for some other reason,
+            // make this picture as isolated.
+            if composite_ops.mix_blend_mode.is_some() &&
+               self.sc_stack.len() > 2 &&
+               parent_pic.requested_composite_mode.is_none() {
+                parent_pic.requested_composite_mode = Some(PictureCompositeMode::Blit);
+            }
+        };
+
         // Push the SC onto the stack, so we know how to handle things in
         // pop_stacking_context.
         let sc = FlattenedStackingContext {
@@ -1184,8 +1213,7 @@ impl<'a> DisplayListFlattener<'a> {
             establishes_3d_context,
             leaf_prim_index,
             root_prim_index: current_prim_index,
-            has_mix_blend_mode: composite_ops.mix_blend_mode.is_some(),
-            parent_prim_index,
+            spatial_node_index,
         };
 
         self.sc_stack.push(sc);
@@ -1200,23 +1228,6 @@ impl<'a> DisplayListFlattener<'a> {
         for i in sc.leaf_prim_index.0 .. sc.root_prim_index.0 + 1 {
             let prim_index = PrimitiveIndex(i);
             self.prim_store.optimize_picture_if_possible(prim_index);
-        }
-
-        let parent_pic = match sc.parent_prim_index {
-            Some(prim_index) => self.prim_store.get_pic_mut(prim_index),
-            None => return, // This must be the root stacking context
-        };
-        parent_pic.add_primitive(sc.root_prim_index);
-
-        // If we have a mix-blend-mode, and we aren't the primary framebuffer,
-        // the stacking context needs to be isolated to blend correctly as per
-        // the CSS spec.
-        // If not already isolated for some other reason,
-        // make this picture as isolated.
-        if sc.has_mix_blend_mode &&
-           self.sc_stack.len() > 2 &&
-           parent_pic.requested_composite_mode.is_none() {
-            parent_pic.requested_composite_mode = Some(PictureCompositeMode::Blit);
         }
 
         assert!(
@@ -2070,10 +2081,9 @@ struct FlattenedStackingContext {
     root_prim_index: PrimitiveIndex,
     leaf_prim_index: PrimitiveIndex,
 
+    spatial_node_index: SpatialNodeIndex,
+
     /// If true, this stacking context establishes a new
     /// 3d rendering context.
     establishes_3d_context: bool,
-    has_mix_blend_mode: bool,
-
-    parent_prim_index: Option<PrimitiveIndex>,
 }
