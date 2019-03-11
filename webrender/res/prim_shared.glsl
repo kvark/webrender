@@ -27,6 +27,8 @@ flat varying vec4 vClipMaskUvBounds;
 // XY and W are homogeneous coordinates, Z is the layer index
 varying vec4 vClipMaskUv;
 
+flat varying vec4 vDebugInstanceRect;
+flat varying vec4 vDebugLocalClipRect;
 
 #ifdef WR_VERTEX_SHADER
 
@@ -102,6 +104,9 @@ VertexInfo write_vertex(RectWithSize instance_rect,
 
     // Clamp to the two local clip rects.
     vec2 clamped_local_pos = clamp_rect(local_pos, local_clip_rect);
+
+    vDebugInstanceRect = vec4(instance_rect.p0, instance_rect.size);
+    vDebugLocalClipRect = vec4(local_clip_rect.p0, local_clip_rect.size);
 
     RectWithSize visible_rect;
     if (snap_to_primitive) {

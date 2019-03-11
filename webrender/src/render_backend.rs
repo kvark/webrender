@@ -551,7 +551,6 @@ impl Document {
             self.clip_scroll_tree.update_tree(
                 pan,
                 &self.dynamic_properties,
-                None,
             );
 
             self.hit_tester = Some(frame_builder.create_hit_tester(
@@ -1644,6 +1643,8 @@ impl RenderBackend {
                 config.serialize(&rendered_document.frame, file_name);
                 let file_name = format!("clip-scroll-{}-{}", (id.0).0, id.1);
                 config.serialize_tree(&doc.clip_scroll_tree, file_name);
+                let file_name = format!("coord-systems-{}-{}", (id.0).0, id.1);
+                config.serialize(&doc.clip_scroll_tree.debug_coordinate_systems(), file_name);
                 let file_name = format!("builder-{}-{}", (id.0).0, id.1);
                 config.serialize(doc.frame_builder.as_ref().unwrap(), file_name);
             }

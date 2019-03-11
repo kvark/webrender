@@ -6,11 +6,10 @@
 use api::{ExternalScrollId, LayoutPixel, LayoutPoint, LayoutRect, LayoutSize, LayoutTransform};
 use api::{LayoutVector2D, PipelineId, PropertyBinding, ReferenceFrameKind, ScrollClamping, ScrollLocation};
 use api::{TransformStyle, ScrollSensitivity, StickyOffsetBounds};
-use clip_scroll_tree::{CoordinateSystem, CoordinateSystemId, SpatialNodeIndex, TransformUpdateState};
+use clip_scroll_tree::{CoordinateSystem, CoordinateSystemId, CoordinateSystemLink, SpatialNodeIndex, TransformUpdateState};
 use euclid::SideOffsets2D;
-use gpu_types::TransformPalette;
 use scene::SceneProperties;
-use util::{LayoutFastTransform, LayoutToWorldFastTransform, ScaleOffset, TransformedRectKind};
+use util::{FastTransform, LayoutFastTransform, LayoutToWorldFastTransform, ScaleOffset, TransformedRectKind};
 
 #[derive(Clone, Debug)]
 pub enum SpatialNodeType {
@@ -38,7 +37,7 @@ pub struct SpatialNode {
     pub world_viewport_transform: LayoutToWorldFastTransform,
 
     /// World transform for content transformed by this node.
-    pub world_content_transform: LayoutToWorldFastTransform,
+    pub world_content_transform_deprecated: LayoutToWorldFastTransform,
 
     /// The current transform kind of world_content_transform.
     pub transform_kind: TransformedRectKind,
@@ -60,9 +59,8 @@ pub struct SpatialNode {
     /// node will not be clipped by clips that are transformed by this node.
     pub invertible: bool,
 
-    /// The axis-aligned coordinate system id of this node.
-    pub coordinate_system_id: CoordinateSystemId,
-
+    /// The axis-aligned coordinate system link of this node.
+    pub coordinate_system_link: CoordinateSystemLink,
     /// The transformation from the coordinate system which established our compatible coordinate
     /// system (same coordinate system id) and us. This can change via scroll offsets and via new
     /// reference frame transforms.
@@ -105,14 +103,17 @@ impl SpatialNode {
     ) -> Self {
         SpatialNode {
             world_viewport_transform: LayoutToWorldFastTransform::identity(),
-            world_content_transform: LayoutToWorldFastTransform::identity(),
+            world_content_transform_deprecated: LayoutToWorldFastTransform::identity(),
             transform_kind: TransformedRectKind::AxisAligned,
             parent: parent_index,
             children: Vec::new(),
             pipeline_id,
             node_type,
             invertible: true,
-            coordinate_system_id: CoordinateSystemId(0),
+            coordinate_system_link: CoordinateSystemLink {
+                id: CoordinateSystemId(0),
+                depth: 0,
+            },
             coordinate_system_relative_scale_offset: ScaleOffset::identity(),
         }
     }
@@ -226,42 +227,27 @@ impl SpatialNode {
         state: &TransformUpdateState,
     ) {
         self.invertible = false;
-        self.coordinate_system_id = state.current_coordinate_system_id;
-        self.world_content_transform = LayoutToWorldFastTransform::identity();
+        self.coordinate_system_link = state.current_coordinate_system_link;
+        self.world_content_transform_deprecated = LayoutToWorldFastTransform::identity();
         self.world_viewport_transform = LayoutToWorldFastTransform::identity();
-    }
-
-    pub fn push_gpu_data(
-        &mut self,
-        transform_palette: &mut TransformPalette,
-        node_index: SpatialNodeIndex,
-    ) {
-        if self.invertible {
-            transform_palette.set_world_transform(
-                node_index,
-                self.world_content_transform
-                    .to_transform()
-                    .into_owned()
-            );
-        }
     }
 
     pub fn update(
         &mut self,
-        state: &mut TransformUpdateState,
+        state: &TransformUpdateState,
         coord_systems: &mut Vec<CoordinateSystem>,
         scene_properties: &SceneProperties,
         previous_spatial_nodes: &[SpatialNode],
-    ) {
+    ) -> bool {
         // If any of our parents was not rendered, we are not rendered either and can just
         // quit here.
         if !state.invertible {
             self.mark_uninvertible(state);
-            return;
+            return false;
         }
 
         self.update_transform(state, coord_systems, scene_properties, previous_spatial_nodes);
-        self.transform_kind = self.world_content_transform.kind();
+        self.transform_kind = self.world_content_transform_deprecated.kind();
 
         // If this node is a reference frame, we check if it has a non-invertible matrix.
         // For non-reference-frames we assume that they will produce only additional
@@ -269,15 +255,16 @@ impl SpatialNode {
         match self.node_type {
             SpatialNodeType::ReferenceFrame(info) if !info.invertible => {
                 self.mark_uninvertible(state);
-                return;
             }
             _ => self.invertible = true,
         }
+
+        self.invertible
     }
 
     pub fn update_transform(
         &mut self,
-        state: &mut TransformUpdateState,
+        state: &TransformUpdateState,
         coord_systems: &mut Vec<CoordinateSystem>,
         scene_properties: &SceneProperties,
         previous_spatial_nodes: &[SpatialNode],
@@ -285,29 +272,35 @@ impl SpatialNode {
         match self.node_type {
             SpatialNodeType::ReferenceFrame(ref mut info) => {
                 // Resolve the transform against any property bindings.
-                let source_transform = LayoutFastTransform::from(
+                let mut source_transform = LayoutFastTransform::from(
                     scene_properties.resolve_layout_transform(&info.source_transform)
                 );
 
                 // Do a change-basis operation on the perspective matrix using
                 // the scroll offset.
-                let source_transform = match info.kind {
-                    ReferenceFrameKind::Perspective { scrolling_relative_to: Some(external_id) } => {
-                        let scroll_offset = compute_offset_from(
-                            self.parent,
-                            external_id,
-                            previous_spatial_nodes,
-                        );
+                if let ReferenceFrameKind::Perspective { scrolling_relative_to: Some(external_id) } = info.kind {
+                    let scroll_offset = compute_offset_from(
+                        self.parent,
+                        external_id,
+                        previous_spatial_nodes,
+                    );
 
-                        // Do a change-basis operation on the
-                        // perspective matrix using the scroll offset.
-                        source_transform
-                            .pre_translate(&scroll_offset)
-                            .post_translate(-scroll_offset)
+                    // Do a change-basis operation on the
+                    // perspective matrix using the scroll offset.
+                    source_transform = source_transform
+                        .pre_translate(&scroll_offset)
+                        .post_translate(-scroll_offset);
+                }
+
+                if info.transform_style == TransformStyle::Flat && false { //TODO
+                    // ignore input Z
+                    if let FastTransform::Transform { ref mut transform, .. } = source_transform {
+                        transform.m31 = 0.0;
+                        transform.m32 = 0.0;
+                        transform.m33 = 0.0;
+                        transform.m34 = 0.0;
                     }
-                    ReferenceFrameKind::Perspective { scrolling_relative_to: None } |
-                    ReferenceFrameKind::Transform => source_transform,
-                };
+                }
 
                 let resolved_transform =
                     LayoutFastTransform::with_vector(info.origin_in_parent_reference_frame)
@@ -324,43 +317,53 @@ impl SpatialNode {
 
                 self.world_viewport_transform =
                     state.parent_reference_frame_transform.pre_mul(&relative_transform.into());
-                self.world_content_transform = self.world_viewport_transform;
+                self.world_content_transform_deprecated = self.world_viewport_transform;
 
                 info.invertible = self.world_viewport_transform.is_invertible();
 
                 if info.invertible {
-                    // Try to update our compatible coordinate system transform. If we cannot, start a new
-                    // incompatible coordinate system.
-                    match ScaleOffset::from_transform(&relative_transform) {
-                        Some(ref scale_offset) => {
-                            self.coordinate_system_relative_scale_offset =
-                                state.coordinate_system_relative_scale_offset.accumulate(scale_offset);
-                        }
-                        None => {
-                            // If we break 2D axis alignment or have a perspective component, we need to start a
-                            // new incompatible coordinate system with which we cannot share clips without masking.
-                            self.coordinate_system_relative_scale_offset = ScaleOffset::identity();
-
-                            let transform = state.coordinate_system_relative_scale_offset
-                                                 .to_transform()
-                                                 .pre_mul(&relative_transform);
-
-                            // Push that new coordinate system and record the new id.
-                            let coord_system = CoordinateSystem {
-                                transform,
-                                is_flatten_root: !state.preserves_3d && info.transform_style == TransformStyle::Preserve3D,
-                                parent: Some(state.current_coordinate_system_id),
-                            };
-                            state.current_coordinate_system_id = CoordinateSystemId(coord_systems.len() as u32);
-                            coord_systems.push(coord_system);
+                    let mut reset_cs_id = info.transform_style != state.transform_style;
+                    // We reset the coordinate system upon either crossing the preserve-3d context boundary,
+                    // or simply a 3D transformation.
+                    if !reset_cs_id {
+                        // Try to update our compatible coordinate system transform. If we cannot, start a new
+                        // incompatible coordinate system.
+                        match ScaleOffset::from_transform(&relative_transform) {
+                            Some(ref scale_offset) => {
+                                self.coordinate_system_relative_scale_offset =
+                                    state.coordinate_system_relative_scale_offset.accumulate(scale_offset);
+                            }
+                            None => reset_cs_id = true,
                         }
                     }
-                }
 
-                // Ensure that the current coordinate system ID is propagated to child
-                // nodes, even if we encounter a node that is not invertible. This ensures
-                // that the invariant in get_relative_transform is not violated.
-                self.coordinate_system_id = state.current_coordinate_system_id;
+                    if reset_cs_id {
+                        // If we break 2D axis alignment or have a perspective component, we need to start a
+                        // new incompatible coordinate system with which we cannot share clips without masking.
+                        self.coordinate_system_relative_scale_offset = ScaleOffset::identity();
+
+                        let transform = state.coordinate_system_relative_scale_offset
+                            .to_transform()
+                            .pre_mul(&relative_transform);
+
+                        // Push that new coordinate system and record the new id.
+                        let coord_system = CoordinateSystem {
+                            transform,
+                            transform_style: info.transform_style,
+                            parent: Some(state.current_coordinate_system_link),
+                        };
+                        // Ensure that the current coordinate system ID is propagated to child
+                        // nodes, even if we encounter a node that is not invertible. This ensures
+                        // that the invariant in get_relative_transform is not violated.
+                        self.coordinate_system_link = CoordinateSystemLink {
+                            id: CoordinateSystemId(coord_systems.len() as u32),
+                            depth: 0,
+                        };
+                        coord_systems.push(coord_system);
+                    } else {
+                        self.coordinate_system_link = state.current_coordinate_system_link;
+                    }
+                }
             }
             _ => {
                 // We calculate this here to avoid a double-borrow later.
@@ -382,11 +385,13 @@ impl SpatialNode {
                 // The transformation for any content inside of us is the viewport transformation, plus
                 // whatever scrolling offset we supply as well.
                 let scroll_offset = self.scroll_offset();
-                self.world_content_transform = if scroll_offset != LayoutVector2D::zero() {
+                self.world_content_transform_deprecated = if scroll_offset != LayoutVector2D::zero() {
                     self.world_viewport_transform.pre_translate(&scroll_offset)
                 } else {
                     self.world_viewport_transform
                 };
+
+                self.coordinate_system_link = state.current_coordinate_system_link;
 
                 let added_offset = state.parent_accumulated_scroll_offset + sticky_offset + scroll_offset;
                 self.coordinate_system_relative_scale_offset =
@@ -395,8 +400,6 @@ impl SpatialNode {
                 if let SpatialNodeType::StickyFrame(ref mut info) = self.node_type {
                     info.current_offset = sticky_offset;
                 }
-
-                self.coordinate_system_id = state.current_coordinate_system_id;
             }
         }
     }
@@ -516,6 +519,9 @@ impl SpatialNode {
             return;
         }
 
+        state.current_coordinate_system_link = self.coordinate_system_link;
+        state.current_coordinate_system_link.depth += 1;
+
         // The transformation we are passing is the transformation of the parent
         // reference frame and the offset is the accumulated offset of all the nodes
         // between us and the parent reference frame. If we are a reference frame,
@@ -529,13 +535,13 @@ impl SpatialNode {
                 // We want nested sticky items to take into account the shift
                 // we applied as well.
                 state.nearest_scrolling_ancestor_offset += info.current_offset;
-                state.preserves_3d = false;
+                state.transform_style = TransformStyle::Flat;
             }
             SpatialNodeType::ScrollFrame(ref scrolling) => {
                 state.parent_accumulated_scroll_offset += scrolling.offset;
                 state.nearest_scrolling_ancestor_offset = scrolling.offset;
                 state.nearest_scrolling_ancestor_viewport = scrolling.viewport_rect;
-                state.preserves_3d = false;
+                state.transform_style = TransformStyle::Flat;
             }
             SpatialNodeType::ReferenceFrame(ref info) => {
                 state.parent_reference_frame_transform = self.world_viewport_transform;
@@ -544,10 +550,11 @@ impl SpatialNode {
                     info.kind == ReferenceFrameKind::Transform &&
                     info.transform_style == TransformStyle::Flat;
 
+                //TODO: remove this once we fully move the flattening logic into `get_relative_transform`
                 if should_flatten {
                     state.parent_reference_frame_transform = state.parent_reference_frame_transform.project_to_2d();
                 }
-                state.preserves_3d = info.transform_style == TransformStyle::Preserve3D;
+                state.transform_style = info.transform_style;
 
                 state.parent_accumulated_scroll_offset = LayoutVector2D::zero();
                 state.coordinate_system_relative_scale_offset = self.coordinate_system_relative_scale_offset;
@@ -620,6 +627,14 @@ impl SpatialNode {
         match self.node_type {
             SpatialNodeType::ScrollFrame(info) if info.external_id == Some(external_id) => true,
             _ => false,
+        }
+    }
+
+    pub fn transform_style(&self) -> TransformStyle {
+        match self.node_type {
+            SpatialNodeType::ReferenceFrame(ref info) => info.transform_style,
+            SpatialNodeType::ScrollFrame(_) |
+            SpatialNodeType::StickyFrame(_) => TransformStyle::Flat,
         }
     }
 }

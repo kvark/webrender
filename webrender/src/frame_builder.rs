@@ -193,9 +193,9 @@ pub struct PictureState {
     pub map_pic_to_world: SpaceMapper<PicturePixel, WorldPixel>,
     pub map_pic_to_raster: SpaceMapper<PicturePixel, RasterPixel>,
     pub map_raster_to_world: SpaceMapper<RasterPixel, WorldPixel>,
-    /// If the plane splitter, the primitives get added to it instead of
+    /// If the plane splitter is Some, the primitives get added to it instead of
     /// batching into their parent pictures.
-    pub plane_splitter: Option<PlaneSplitter>,
+    pub plane_splitter: Option<(PlaneSplitter, SpatialNodeIndex)>,
 }
 
 pub struct PrimitiveContext<'a> {
@@ -522,13 +522,9 @@ impl FrameBuilder {
 
         self.globals.update(gpu_cache);
 
-        let mut transform_palette = TransformPalette::new();
-        clip_scroll_tree.update_tree(
-            pan,
-            scene_properties,
-            Some(&mut transform_palette),
-        );
+        clip_scroll_tree.update_tree(pan, scene_properties);
         self.clip_store.clear_old_instances();
+        let mut transform_palette = clip_scroll_tree.build_transform_palette();
 
         let mut render_tasks = RenderTaskTree::new(
             stamp.frame_id(),
@@ -658,7 +654,7 @@ impl FrameBuilder {
             layer,
             profile_counters,
             passes,
-            transform_palette: transform_palette.transforms,
+            transform_palette: transform_palette.finish(),
             render_tasks,
             deferred_resolves,
             gpu_cache_frame_id,

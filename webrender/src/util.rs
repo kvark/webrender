@@ -188,9 +188,9 @@ impl ScaleOffset {
         )
     }
 
-    // Produce a ScaleOffset that includes both self
-    // and other. The 'self' ScaleOffset is applied
-    // after other.
+    /// Produce a ScaleOffset that includes both self and other.
+    /// The 'self' ScaleOffset is applied after other.
+    /// This is equivalent to `TypedTransform3D::pre_mul`.
     pub fn accumulate(&self, other: &ScaleOffset) -> Self {
         ScaleOffset {
             scale: Vector2D::new(
@@ -753,7 +753,7 @@ impl<Src, Dst> FastTransform<Src, Dst> {
         }
     }
 
-    pub fn unapply(&self, rect: &TypedRect<f32, Dst>) -> Option<TypedRect<f32, Src>> {
+    pub fn _unapply(&self, rect: &TypedRect<f32, Dst>) -> Option<TypedRect<f32, Src>> {
         match *self {
             FastTransform::Offset(offset) =>
                 Some(TypedRect::from_untyped(&rect.to_untyped().translate(&-offset.to_untyped()))),

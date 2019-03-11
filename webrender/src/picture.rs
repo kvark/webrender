@@ -19,7 +19,7 @@ use intern::ItemUid;
 use internal_types::{FastHashMap, FastHashSet, PlaneSplitter};
 use frame_builder::{FrameBuildingContext, FrameBuildingState, PictureState, PictureContext};
 use gpu_cache::{GpuCache, GpuCacheAddress, GpuCacheHandle};
-use gpu_types::{TransformPalette, UvRectKind};
+use gpu_types::UvRectKind;
 use plane_split::{Clipper, Polygon, Splitter};
 use prim_store::{PictureIndex, PrimitiveInstance, SpaceMapper, PrimitiveInstanceKind};
 use prim_store::{get_raster_rects, PrimitiveScratchBuffer, VectorKey, PointKey};
@@ -788,11 +788,7 @@ impl TileCache {
 
         // Work out the scroll offset to apply to the world reference point.
         let scroll_offset_point = frame_context.clip_scroll_tree
-            .get_relative_transform(
-                self.spatial_node_index,
-                ROOT_SPATIAL_NODE_INDEX,
-            )
-            .expect("bug: unable to get scroll transform")
+            .get_world_transform(self.spatial_node_index)
             .flattened
             .inverse_project_2d_origin()
             .unwrap_or_else(LayoutPoint::zero);
@@ -1216,7 +1212,7 @@ impl TileCache {
                                 size,
                             );
 
-                            if clip_spatial_node.coordinate_system_id == CoordinateSystemId(0) {
+                            if clip_spatial_node.coordinate_system_link.id == CoordinateSystemId(0) {
                                 // Clips that are not in the root coordinate system are not axis-aligned,
                                 // so we need to treat them as normal style clips with vertices.
                                 match self.map_local_to_world.map(&local_clip_rect) {
@@ -1433,7 +1429,6 @@ impl TileCache {
                             self.spatial_node_index,
                             spatial_node_index,
                         )
-                        .expect("BUG: unable to get relative transform")
                         .flattened
                         .transform_point2d(&LayoutPoint::zero())
                 } else {
@@ -1442,7 +1437,6 @@ impl TileCache {
                             spatial_node_index,
                             self.spatial_node_index,
                         )
-                        .expect("BUG: unable to get relative transform")
                         .flattened
                         .inverse_project_2d_origin()
                 };
@@ -2399,8 +2393,8 @@ impl PicturePrimitive {
             Picture3DContext::Out => {
                 None
             }
-            Picture3DContext::In { root_data: Some(_), .. } => {
-                Some(PlaneSplitter::new())
+            Picture3DContext::In { root_data: Some(_), ancestor_index } => {
+                Some((PlaneSplitter::new(), ancestor_index))
             }
             Picture3DContext::In { root_data: None, .. } => {
                 None
@@ -2495,15 +2489,21 @@ impl PicturePrimitive {
     /// given plane splitter.
     pub fn add_split_plane(
         splitter: &mut PlaneSplitter,
-        transforms: &TransformPalette,
+        clip_scroll_tree: &ClipScrollTree,
         prim_instance: &PrimitiveInstance,
         original_local_rect: LayoutRect,
         combined_local_clip_rect: &LayoutRect,
-        world_rect: WorldRect,
+        pic_rect: PictureRect,
         plane_split_anchor: usize,
+        root_spatial_node_index: SpatialNodeIndex,
     ) -> bool {
-        let transform = transforms
-            .get_world_transform(prim_instance.spatial_node_index);
+        let transform = clip_scroll_tree
+            .get_relative_transform(
+                prim_instance.spatial_node_index,
+                root_spatial_node_index,
+            )
+            .flattened
+            .with_destination::<PicturePixel>();
         let matrix = transform.cast();
 
         // Apply the local clip rect here, before splitting. This is
@@ -2518,12 +2518,14 @@ impl PicturePrimitive {
             Some(rect) => rect.cast(),
             None => return false,
         };
-        let world_rect = world_rect.cast();
+        let pic_rect = pic_rect.cast();
 
         match transform.transform_kind() {
             TransformedRectKind::AxisAligned => {
-                let inv_transform = transforms
-                    .get_world_inv_transform(prim_instance.spatial_node_index);
+                let inv_transform = match transform.inverse() {
+                    Some(transform) => transform,
+                    None => return false,
+                };
                 let polygon = Polygon::from_transformed_rect_with_inverse(
                     local_rect,
                     &matrix,
@@ -2540,7 +2542,7 @@ impl PicturePrimitive {
                         plane_split_anchor,
                     ),
                     &matrix,
-                    Some(world_rect),
+                    Some(pic_rect),
                 );
                 if let Ok(results) = results {
                     for poly in results {
@@ -2556,19 +2558,31 @@ impl PicturePrimitive {
     pub fn resolve_split_planes(
         &mut self,
         splitter: &mut PlaneSplitter,
-        frame_state: &mut FrameBuildingState,
+        gpu_cache: &mut GpuCache,
+        clip_scroll_tree: &ClipScrollTree,
     ) {
-        let ordered = match self.context_3d {
-            Picture3DContext::In { root_data: Some(ref mut list), .. } => list,
+        let (ordered, root_spatial_node_index) = match self.context_3d {
+            Picture3DContext::In { root_data: Some(ref mut list), ancestor_index } => (list, ancestor_index),
             _ => panic!("Expected to find 3D context root"),
         };
         ordered.clear();
 
+        let root_transform = clip_scroll_tree.get_world_transform(root_spatial_node_index).flattened;
+        let view = vec3(root_transform.m13, root_transform.m23, root_transform.m33).to_f64();
+
         // Process the accumulated split planes and order them for rendering.
         // Z axis is directed at the screen, `sort` is ascending, and we need back-to-front order.
-        for poly in splitter.sort(vec3(0.0, 0.0, 1.0)) {
+        for poly in splitter.sort(view) {
             let spatial_node_index = self.prim_list.prim_instances[poly.anchor].spatial_node_index;
-            let transform = frame_state.transforms.get_world_inv_transform(spatial_node_index);
+            let transform = clip_scroll_tree
+                .get_relative_transform(
+                    spatial_node_index,
+                    root_spatial_node_index,
+                )
+                .flattened
+                .with_destination::<PicturePixel>()
+                .inverse()
+                .expect("should be invertible");
 
             let local_points = [
                 transform.transform_point3d(&poly.points[0].cast()).unwrap(),
@@ -2580,8 +2594,8 @@ impl PicturePrimitive {
                 [local_points[0].x, local_points[0].y, local_points[1].x, local_points[1].y].into(),
                 [local_points[2].x, local_points[2].y, local_points[3].x, local_points[3].y].into(),
             ];
-            let gpu_handle = frame_state.gpu_cache.push_per_frame_blocks(&gpu_blocks);
-            let gpu_address = frame_state.gpu_cache.get_address(&gpu_handle);
+            let gpu_handle = gpu_cache.push_per_frame_blocks(&gpu_blocks);
+            let gpu_address = gpu_cache.get_address(&gpu_handle);
 
             ordered.push(OrderedPictureChild {
                 anchor: poly.anchor,
@@ -2695,7 +2709,6 @@ impl PicturePrimitive {
             // rasterization root should be established.
             let establishes_raster_root = frame_context.clip_scroll_tree
                 .get_relative_transform(surface_spatial_node_index, parent_raster_node_index)
-                .expect("BUG: unable to get relative transform")
                 .is_perspective;
 
             let surface = SurfaceInfo::new(
@@ -2873,8 +2886,12 @@ impl PicturePrimitive {
     ) -> bool {
         let (mut pic_state_for_children, pic_context) = self.take_state_and_context();
 
-        if let Some(ref mut splitter) = pic_state_for_children.plane_splitter {
-            self.resolve_split_planes(splitter, frame_state);
+        if let Some((ref mut splitter, _)) = pic_state_for_children.plane_splitter {
+            self.resolve_split_planes(
+                splitter,
+                &mut frame_state.gpu_cache,
+                frame_context.clip_scroll_tree,
+            );
         }
 
         let raster_config = match self.raster_config {

@@ -3,8 +3,8 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use api::{DebugCommand, DocumentId, ExternalImageData, ExternalImageId};
-use api::{DeviceIntPoint, DeviceIntRect, DeviceIntSize};
-use api::{ImageFormat, WorldPixel, NotificationRequest};
+use api::{DeviceIntPoint, DeviceIntRect, DeviceIntSize, PicturePixel};
+use api::{ImageFormat, NotificationRequest};
 use device::TextureFilter;
 use renderer::PipelineInfo;
 use gpu_cache::GpuCacheUpdateList;
@@ -28,7 +28,7 @@ pub type FastHashMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
 pub type FastHashSet<K> = HashSet<K, BuildHasherDefault<FxHasher>>;
 
 /// A concrete plane splitter type used in WebRender.
-pub type PlaneSplitter = BspSplitter<f64, WorldPixel>;
+pub type PlaneSplitter = BspSplitter<f64, PicturePixel>;
 
 /// An ID for a texture that is owned by the `texture_cache` module.
 ///

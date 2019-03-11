@@ -5,8 +5,8 @@
 use api::{
     DeviceHomogeneousVector, DevicePoint, DeviceSize, DeviceRect,
     LayoutRect, LayoutToWorldTransform,
-    PremultipliedColorF, LayoutToPictureTransform, PictureToLayoutTransform, PicturePixel,
-    WorldPixel, WorldToLayoutTransform, LayoutPoint, DeviceVector2D
+    PremultipliedColorF, LayoutToPictureTransform, PicturePixel,
+    LayoutPoint, DeviceVector2D
 };
 use clip_scroll_tree::{ClipScrollTree, ROOT_SPATIAL_NODE_INDEX, SpatialNodeIndex};
 use gpu_cache::{GpuCacheAddress, GpuDataRequest};
@@ -398,14 +398,12 @@ impl TransformPaletteId {
 #[repr(C)]
 pub struct TransformData {
     transform: LayoutToPictureTransform,
-    inv_transform: PictureToLayoutTransform,
 }
 
 impl TransformData {
     fn invalid() -> Self {
         TransformData {
             transform: LayoutToPictureTransform::identity(),
-            inv_transform: PictureToLayoutTransform::identity(),
         }
     }
 }
@@ -438,23 +436,22 @@ struct RelativeTransformKey {
 //           specifying a coordinate system that the transform
 //           should be relative to.
 pub struct TransformPalette {
-    pub transforms: Vec<TransformData>,
+    transforms: Vec<TransformData>,
     metadata: Vec<TransformMetadata>,
     map: FastHashMap<RelativeTransformKey, usize>,
 }
 
 impl TransformPalette {
-    pub fn new() -> Self {
+    pub fn new(count: usize) -> Self {
         TransformPalette {
-            transforms: Vec::new(),
-            metadata: Vec::new(),
+            transforms: vec![TransformData::invalid(); count],
+            metadata: vec![TransformMetadata::invalid(); count],
             map: FastHashMap::default(),
         }
     }
 
-    pub fn allocate(&mut self, count: usize) {
-        self.transforms = vec![TransformData::invalid(); count];
-        self.metadata = vec![TransformMetadata::invalid(); count];
+    pub fn finish(self) -> Vec<TransformData> {
+        self.transforms
     }
 
     pub fn set_world_transform(
@@ -498,7 +495,6 @@ impl TransformPalette {
                         child_index,
                         parent_index,
                     )
-                    .unwrap_or_default()
                     .flattened
                     .with_destination::<PicturePixel>();
 
@@ -511,24 +507,6 @@ impl TransformPalette {
                     )
                 })
         }
-    }
-
-    pub fn get_world_transform(
-        &self,
-        index: SpatialNodeIndex,
-    ) -> LayoutToWorldTransform {
-        self.transforms[index.0 as usize]
-            .transform
-            .with_destination::<WorldPixel>()
-    }
-
-    pub fn get_world_inv_transform(
-        &self,
-        index: SpatialNodeIndex,
-    ) -> WorldToLayoutTransform {
-        self.transforms[index.0 as usize]
-            .inv_transform
-            .with_source::<WorldPixel>()
     }
 
     // Get a transform palette id for the given spatial node.
@@ -648,23 +626,11 @@ fn register_transform(
     to_index: SpatialNodeIndex,
     transform: LayoutToPictureTransform,
 ) -> usize {
-    // TODO(gw): This shouldn't ever happen - should be eliminated before
-    //           we get an uninvertible transform here. But maybe do
-    //           some investigation on if this ever happens?
-    let inv_transform = match transform.inverse() {
-        Some(inv_transform) => inv_transform,
-        None => {
-            error!("Unable to get inverse transform");
-            PictureToLayoutTransform::identity()
-        }
-    };
-
     let metadata = TransformMetadata {
         transform_kind: transform.transform_kind()
     };
     let data = TransformData {
         transform,
-        inv_transform,
     };
 
     if to_index == ROOT_SPATIAL_NODE_INDEX {

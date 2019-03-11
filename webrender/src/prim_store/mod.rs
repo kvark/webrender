@@ -4,7 +4,7 @@
 
 use api::{BorderRadius, ClipMode, ColorF};
 use api::{FilterOp, ImageRendering, TileOffset, RepeatMode, WorldPoint, WorldSize};
-use api::{PremultipliedColorF, PropertyBinding, Shadow, GradientStop};
+use api::{PremultipliedColorF, PropertyBinding, Shadow};
 use api::{BoxShadowClipMode, LineStyle, LineOrientation, AuHelpers};
 use api::{LayoutPrimitiveInfo, PrimitiveKeyKind};
 use api::units::*;
@@ -17,7 +17,6 @@ use debug_colors;
 use debug_render::DebugItem;
 use display_list_flattener::{CreateShadow, IsVisible};
 use euclid::{SideOffsets2D, TypedTransform3D, TypedRect, TypedScale, TypedSize2D};
-use euclid::approxeq::ApproxEq;
 use frame_builder::{FrameBuildingContext, FrameBuildingState, PictureContext, PictureState};
 use frame_builder::{PrimitiveContext, FrameVisibilityContext, FrameVisibilityState};
 use glyph_rasterizer::GlyphKey;
@@ -29,8 +28,7 @@ use malloc_size_of::MallocSizeOf;
 use picture::{PictureCompositeMode, PicturePrimitive};
 use picture::{ClusterIndex, PrimitiveList, RecordedDirtyRegion, SurfaceIndex, RetainedTiles, RasterConfig};
 use prim_store::borders::{ImageBorderDataHandle, NormalBorderDataHandle};
-use prim_store::gradient::{GRADIENT_FP_STOPS, GradientCacheKey, GradientStopKey};
-use prim_store::gradient::{LinearGradientPrimitive, LinearGradientDataHandle, RadialGradientDataHandle};
+use prim_store::gradient::{LinearGradientDataHandle, RadialGradientDataHandle};
 use prim_store::image::{ImageDataHandle, ImageInstance, VisibleImageTile, YuvImageDataHandle};
 use prim_store::line_dec::LineDecorationDataHandle;
 use prim_store::picture::PictureDataHandle;
@@ -48,7 +46,6 @@ use std::{cmp, fmt, hash, ops, u32, usize, mem};
 #[cfg(debug_assertions)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use storage;
-use texture_cache::TEXTURE_REGION_DIMENSIONS;
 use util::{ScaleOffset, MatrixHelpers, MaxRect, Recycler, TransformedRectKind};
 use util::{pack_as_float, project_rect, raster_rect_to_device_pixels};
 use util::{scale_factors, clamp_to_scale_factor};
@@ -141,27 +138,27 @@ impl<F, T> CoordinateSpaceMapping<F, T> {
         ref_spatial_node_index: SpatialNodeIndex,
         target_node_index: SpatialNodeIndex,
         clip_scroll_tree: &ClipScrollTree,
-    ) -> Option<(Self, VisibleFace)> {
+    ) -> (Self, VisibleFace) {
         let spatial_nodes = &clip_scroll_tree.spatial_nodes;
         let ref_spatial_node = &spatial_nodes[ref_spatial_node_index.0 as usize];
         let target_spatial_node = &spatial_nodes[target_node_index.0 as usize];
 
         if ref_spatial_node_index == target_node_index {
-            Some((CoordinateSpaceMapping::Local, VisibleFace::Front))
-        } else if ref_spatial_node.coordinate_system_id == target_spatial_node.coordinate_system_id {
+            (CoordinateSpaceMapping::Local, VisibleFace::Front)
+        } else if ref_spatial_node.coordinate_system_link.id == target_spatial_node.coordinate_system_link.id {
             let scale_offset = ref_spatial_node.coordinate_system_relative_scale_offset
                 .inverse()
                 .accumulate(&target_spatial_node.coordinate_system_relative_scale_offset);
-            Some((CoordinateSpaceMapping::ScaleOffset(scale_offset), VisibleFace::Front))
+            (CoordinateSpaceMapping::ScaleOffset(scale_offset), VisibleFace::Front)
         } else {
-            clip_scroll_tree
-                .get_relative_transform(target_node_index, ref_spatial_node_index)
-                .map(|relative| (
-                    CoordinateSpaceMapping::Transform(
-                        relative.flattened.with_source::<F>().with_destination::<T>()
-                    ),
-                    relative.visible_face,
-                ))
+            let relative = clip_scroll_tree
+                .get_relative_transform(target_node_index, ref_spatial_node_index);
+            (
+                CoordinateSpaceMapping::Transform(
+                    relative.flattened.with_source::<F>().with_destination::<T>()
+                ),
+                relative.visible_face,
+            )
         }
     }
 }
@@ -212,7 +209,7 @@ impl<F, T> SpaceMapper<F, T> where F: fmt::Debug {
                 self.ref_spatial_node_index,
                 target_node_index,
                 clip_scroll_tree,
-            ).expect("bug: should have been culled by invalid node");
+            );
 
             self.kind = kind;
             self.visible_face = visible_face;
@@ -1324,7 +1321,7 @@ pub enum PrimitiveInstanceKind {
     LinearGradient {
         /// Handle to the common interned data for this primitive.
         data_handle: LinearGradientDataHandle,
-        gradient_index: LinearGradientIndex,
+        visible_tiles_range: GradientTileRange,
     },
     RadialGradient {
         /// Handle to the common interned data for this primitive.
@@ -1505,8 +1502,6 @@ pub type ImageInstanceStorage = storage::Storage<ImageInstance>;
 pub type ImageInstanceIndex = storage::Index<ImageInstance>;
 pub type GradientTileStorage = storage::Storage<VisibleGradientTile>;
 pub type GradientTileRange = storage::Range<VisibleGradientTile>;
-pub type LinearGradientIndex = storage::Index<LinearGradientPrimitive>;
-pub type LinearGradientStorage = storage::Storage<LinearGradientPrimitive>;
 
 /// Contains various vecs of data that is used only during frame building,
 /// where we want to recycle the memory each new display list, to avoid constantly
@@ -1631,7 +1626,6 @@ pub struct PrimitiveStoreStats {
     text_run_count: usize,
     opacity_binding_count: usize,
     image_count: usize,
-    linear_gradient_count: usize,
 }
 
 impl PrimitiveStoreStats {
@@ -1641,7 +1635,6 @@ impl PrimitiveStoreStats {
             text_run_count: 0,
             opacity_binding_count: 0,
             image_count: 0,
-            linear_gradient_count: 0,
         }
     }
 }
@@ -1650,7 +1643,6 @@ impl PrimitiveStoreStats {
 pub struct PrimitiveStore {
     pub pictures: Vec<PicturePrimitive>,
     pub text_runs: TextRunStorage,
-    pub linear_gradients: LinearGradientStorage,
 
     /// A list of image instances. These are stored separately as
     /// storing them inline in the instance makes the structure bigger
@@ -1668,7 +1660,6 @@ impl PrimitiveStore {
             text_runs: TextRunStorage::new(stats.text_run_count),
             images: ImageInstanceStorage::new(stats.image_count),
             opacity_bindings: OpacityBindingStorage::new(stats.opacity_binding_count),
-            linear_gradients: LinearGradientStorage::new(stats.linear_gradient_count),
         }
     }
 
@@ -1678,7 +1669,6 @@ impl PrimitiveStore {
             text_run_count: self.text_runs.len(),
             image_count: self.images.len(),
             opacity_binding_count: self.opacity_bindings.len(),
-            linear_gradient_count: self.linear_gradients.len(),
         }
     }
 
@@ -2298,15 +2288,16 @@ impl PrimitiveStore {
                     frame_state,
                     data_stores,
                 ) {
-                    if let Some(ref mut splitter) = pic_state.plane_splitter {
+                    if let Some((ref mut splitter, ancestor_index)) = pic_state.plane_splitter {
                         PicturePrimitive::add_split_plane(
                             splitter,
-                            frame_state.transforms,
+                            frame_context.clip_scroll_tree,
                             prim_instance,
                             pic.local_rect,
                             &prim_info.combined_local_clip_rect,
-                            frame_context.screen_world_rect,
+                            pic_state.map_local_to_pic.bounds, //TODO!!!
                             plane_split_anchor,
+                            ancestor_index,
                         );
                     }
                 } else {
@@ -2504,7 +2495,8 @@ impl PrimitiveStore {
                 prim_data.update(frame_state);
 
                 // The transform only makes sense for screen space rasterization
-                let transform = prim_context.spatial_node.world_content_transform.to_transform();
+                let transform = frame_context.clip_scroll_tree
+                    .get_world_transform(prim_context.spatial_node_index);
                 let prim_offset = prim_instance.prim_origin.to_vector() - run.reference_frame_relative_offset;
 
                 // TODO(gw): This match is a bit untidy, but it should disappear completely
@@ -2516,7 +2508,7 @@ impl PrimitiveStore {
                     &prim_data.font,
                     &prim_data.glyphs,
                     device_pixel_scale,
-                    &transform,
+                    &transform.flattened,
                     pic_context,
                     frame_state.resource_cache,
                     frame_state.gpu_cache,
@@ -2543,11 +2535,12 @@ impl PrimitiveStore {
                 // TODO(gw): When drawing in screen raster mode, we should also incorporate a
                 //           scale factor from the world transform to get an appropriately
                 //           sized border task.
-                let transform = prim_context.spatial_node.world_content_transform.to_transform();
+                let transform = frame_context.clip_scroll_tree
+                    .get_world_transform(prim_context.spatial_node_index);
 
                 // Scale factors are normalized to a power of 2 to reduce the number of
                 // resolution changes
-                let scale = scale_factors(&transform);
+                let scale = scale_factors(&transform.flattened);
                 // For frames with a changing scale transform round scale factors up to
                 // nearest power-of-2 boundary so that we don't keep having to redraw
                 // the content as it scales up and down. Rounding up to nearest
@@ -2678,10 +2671,10 @@ impl PrimitiveStore {
                         .intersection(&prim_rect).unwrap();
                     image_instance.tight_local_clip_rect = tight_clip_rect;
 
-                    let visible_rect = compute_conservative_visible_rect(
-                        prim_context,
+                    let visible_rect = frame_context.clip_scroll_tree.compute_conservative_visible_rect(
+                        prim_context.spatial_node_index,
                         &frame_state.current_dirty_region().combined.world_rect,
-                        &tight_clip_rect
+                        &tight_clip_rect,
                     );
 
                     let base_edge_flags = edge_flags_for_tile_spacing(&image_data.tile_spacing);
@@ -2740,85 +2733,12 @@ impl PrimitiveStore {
                     image_data.write_prim_gpu_blocks(request);
                 });
             }
-            PrimitiveInstanceKind::LinearGradient { data_handle, gradient_index, .. } => {
+            PrimitiveInstanceKind::LinearGradient { data_handle, ref mut visible_tiles_range, .. } => {
                 let prim_data = &mut data_stores.linear_grad[*data_handle];
-                let gradient = &mut self.linear_gradients[*gradient_index];
 
                 // Update the template this instane references, which may refresh the GPU
                 // cache with any shared template data.
                 prim_data.update(frame_state);
-
-                if prim_data.supports_caching {
-                    let gradient_size = (prim_data.end_point - prim_data.start_point).to_size();
-
-                    // Calculate what the range of the gradient is that covers this
-                    // primitive. These values are included in the cache key. The
-                    // size of the gradient task is the length of a texture cache
-                    // region, for maximum accuracy, and a minimal size on the
-                    // axis that doesn't matter.
-                    let (size, orientation, start_point, end_point) = if prim_data.start_point.x.approx_eq(&prim_data.end_point.x) {
-                        let start_point = -prim_data.start_point.y / gradient_size.height;
-                        let end_point = (prim_data.common.prim_size.height - prim_data.start_point.y) / gradient_size.height;
-                        let size = DeviceIntSize::new(16, TEXTURE_REGION_DIMENSIONS);
-                        (size, LineOrientation::Vertical, start_point, end_point)
-                    } else {
-                        let start_point = -prim_data.start_point.x / gradient_size.width;
-                        let end_point = (prim_data.common.prim_size.width - prim_data.start_point.x) / gradient_size.width;
-                        let size = DeviceIntSize::new(TEXTURE_REGION_DIMENSIONS, 16);
-                        (size, LineOrientation::Horizontal, start_point, end_point)
-                    };
-
-                    // Build the cache key, including information about the stops.
-                    let mut stops = [GradientStopKey::empty(); GRADIENT_FP_STOPS];
-
-                    // Reverse the stops as required, same as the gradient builder does
-                    // for the slow path.
-                    if prim_data.reverse_stops {
-                        for (src, dest) in prim_data.stops.iter().rev().zip(stops.iter_mut()) {
-                            let stop = GradientStop {
-                                offset: 1.0 - src.offset,
-                                color: src.color,
-                            };
-                            *dest = stop.into();
-                        }
-                    } else {
-                        for (src, dest) in prim_data.stops.iter().zip(stops.iter_mut()) {
-                            *dest = (*src).into();
-                        }
-                    }
-
-                    let cache_key = GradientCacheKey {
-                        orientation,
-                        start_stop_point: VectorKey {
-                            x: start_point,
-                            y: end_point,
-                        },
-                        stops,
-                    };
-
-                    // Request the render task each frame.
-                    gradient.cache_handle = Some(frame_state.resource_cache.request_render_task(
-                        RenderTaskCacheKey {
-                            size: size,
-                            kind: RenderTaskCacheKeyKind::Gradient(cache_key),
-                        },
-                        frame_state.gpu_cache,
-                        frame_state.render_tasks,
-                        None,
-                        prim_data.stops_opacity.is_opaque,
-                        |render_tasks| {
-                            let task = RenderTask::new_gradient(
-                                size,
-                                stops,
-                                orientation,
-                                start_point,
-                                end_point,
-                            );
-
-                            render_tasks.add(task)
-                        }
-                    ));
-                }
 
                 if prim_data.tile_spacing != LayoutSize::zero() {
                     let prim_info = &scratch.prim_info[prim_instance.visibility_info.0 as usize];
@@ -2827,12 +2747,13 @@ impl PrimitiveStore {
                         prim_data.common.prim_size,
                     );
 
-                    gradient.visible_tiles_range = decompose_repeated_primitive(
+                    *visible_tiles_range = decompose_repeated_primitive(
                         &prim_info.combined_local_clip_rect,
                         &prim_rect,
                         &prim_data.stretch_size,
                         &prim_data.tile_spacing,
                         prim_context,
+                        &frame_context.clip_scroll_tree,
                         frame_state,
                         &mut scratch.gradient_tiles,
                         &mut |_, mut request| {
@@ -2851,7 +2772,7 @@ impl PrimitiveStore {
                         }
                     );
 
-                    if gradient.visible_tiles_range.is_empty() {
+                    if visible_tiles_range.is_empty() {
                         prim_instance.visibility_info = PrimitiveVisibilityIndex::INVALID;
                     }
                 }
@@ -2879,6 +2800,7 @@ impl PrimitiveStore {
                         &prim_data.stretch_size,
                         &prim_data.tile_spacing,
                         prim_context,
+                        &frame_context.clip_scroll_tree,
                         frame_state,
                         &mut scratch.gradient_tiles,
                         &mut |_, mut request| {
@@ -2943,6 +2865,7 @@ fn decompose_repeated_primitive(
     stretch_size: &LayoutSize,
     tile_spacing: &LayoutSize,
     prim_context: &PrimitiveContext,
+    clip_scroll_tree: &ClipScrollTree,
     frame_state: &mut FrameBuildingState,
     gradient_tiles: &mut GradientTileStorage,
     callback: &mut FnMut(&LayoutRect, GpuDataRequest),
@@ -2956,10 +2879,10 @@ fn decompose_repeated_primitive(
     let tight_clip_rect = combined_local_clip_rect
         .intersection(prim_local_rect).unwrap();
 
-    let visible_rect = compute_conservative_visible_rect(
-        prim_context,
+    let visible_rect = clip_scroll_tree.compute_conservative_visible_rect(
+        prim_context.spatial_node_index,
         &world_rect,
-        &tight_clip_rect
+        &tight_clip_rect,
     );
     let stride = *stretch_size + *tile_spacing;
 
@@ -2992,22 +2915,6 @@ fn decompose_repeated_primitive(
     } else {
         gradient_tiles.extend(visible_tiles)
     }
-}
-
-fn compute_conservative_visible_rect(
-    prim_context: &PrimitiveContext,
-    world_rect: &WorldRect,
-    local_clip_rect: &LayoutRect,
-) -> LayoutRect {
-    if let Some(layer_screen_rect) = prim_context
-        .spatial_node
-        .world_content_transform
-        .unapply(world_rect) {
-
-        return local_clip_rect.intersection(&layer_screen_rect).unwrap_or(LayoutRect::zero());
-    }
-
-    *local_clip_rect
 }
 
 fn edge_flags_for_tile_spacing(tile_spacing: &LayoutSize) -> EdgeAaSegmentMask {

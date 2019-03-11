@@ -172,7 +172,7 @@ impl HitTester {
 
             self.spatial_nodes.push(HitTestSpatialNode {
                 pipeline_id: node.pipeline_id,
-                world_content_transform: node.world_content_transform,
+                world_content_transform: node.world_content_transform_deprecated,
                 world_viewport_transform: node.world_viewport_transform,
             });
         }

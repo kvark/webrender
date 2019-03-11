@@ -16,6 +16,9 @@ void brush_vs(
     vec4 segment_data
 );
 
+flat varying vec4 vDebugSegment0, vDebugSegment1;
+flat varying ivec4 vDebugAData, vDebugIndexes;
+
 #define VECS_PER_SEGMENT                    2
 
 #define BRUSH_FLAG_PERSPECTIVE_INTERPOLATION    1
@@ -40,18 +43,24 @@ void main(void) {
     // Fetch the segment of this brush primitive we are drawing.
     vec4 segment_data;
     RectWithSize segment_rect;
+    vDebugAData = ivec4(aData);
     if (segment_index == INVALID_SEGMENT_INDEX) {
         segment_rect = ph.local_rect;
         segment_data = vec4(0.0);
+        vDebugIndexes = ivec4(-1);
+        vDebugSegment0 = vDebugSegment1 = vec4(-1.0);
     } else {
         int segment_address = ph.specific_prim_address +
                               VECS_PER_SPECIFIC_BRUSH +
                               segment_index * VECS_PER_SEGMENT;
 
+        vDebugIndexes = ivec4(segment_index, segment_address, 0, 0);
         vec4[2] segment_info = fetch_from_gpu_cache_2(segment_address);
         segment_rect = RectWithSize(segment_info[0].xy, segment_info[0].zw);
         segment_rect.p0 += ph.local_rect.p0;
         segment_data = segment_info[1];
+        vDebugSegment0 = segment_info[0];
+        vDebugSegment1 = segment_info[1];
     }
 
     VertexInfo vi;

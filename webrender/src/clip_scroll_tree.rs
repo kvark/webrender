@@ -2,9 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use api::{ExternalScrollId, LayoutPoint, LayoutRect, LayoutVector2D, ReferenceFrameKind};
+use api::{ExternalScrollId, PropertyBinding, ReferenceFrameKind, TransformStyle};
 use api::{PipelineId, ScrollClamping, ScrollNodeState, ScrollLocation, ScrollSensitivity};
-use api::{LayoutSize, LayoutTransform, PropertyBinding, TransformStyle, WorldPoint};
+use api::units::*;
+use euclid::TypedTransform3D;
 use gpu_types::TransformPalette;
 use internal_types::{FastHashMap, FastHashSet};
 use print_tree::{PrintableTree, PrintTree, PrintTreePrinter};
@@ -24,22 +25,31 @@ pub type ScrollStates = FastHashMap<ExternalScrollId, ScrollFrameInfo>;
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 pub struct CoordinateSystemId(pub u32);
 
+
+#[derive(Debug, Copy, Clone, PartialEq)]
+#[cfg_attr(feature = "capture", derive(Serialize))]
+#[cfg_attr(feature = "replay", derive(Deserialize))]
+pub struct CoordinateSystemLink {
+    /// Id of the target coordinate system.
+    pub id: CoordinateSystemId,
+    /// A number of parent node links on the way to the coordinate system root.
+    pub depth: u32,
+}
+
 /// A node in the hierarchy of coordinate system
 /// transforms.
 #[derive(Debug)]
 pub struct CoordinateSystem {
     pub transform: LayoutTransform,
-    /// True if the Z component of the resulting transform, when ascending
-    /// from children to a parent, needs to be flattened upon passing this system.
-    pub is_flatten_root: bool,
-    pub parent: Option<CoordinateSystemId>,
+    pub transform_style: TransformStyle,
+    pub parent: Option<CoordinateSystemLink>,
 }
 
 impl CoordinateSystem {
     fn root() -> Self {
         CoordinateSystem {
             transform: LayoutTransform::identity(),
-            is_flatten_root: true,
+            transform_style: TransformStyle::Flat,
             parent: None,
         }
     }
@@ -116,11 +126,11 @@ pub struct TransformUpdateState {
     pub nearest_scrolling_ancestor_offset: LayoutVector2D,
     pub nearest_scrolling_ancestor_viewport: LayoutRect,
 
-    /// An id for keeping track of the axis-aligned space of this node. This is used in
+    /// An link for keeping track of the axis-aligned space of this node. This is used in
     /// order to to track what kinds of clip optimizations can be done for a particular
     /// display list item, since optimizations can usually only be done among
     /// coordinate systems which are relatively axis aligned.
-    pub current_coordinate_system_id: CoordinateSystemId,
+    pub current_coordinate_system_link: CoordinateSystemLink,
 
     /// Scale and offset from the coordinate system that started this compatible coordinate system.
     pub coordinate_system_relative_scale_offset: ScaleOffset,
@@ -130,15 +140,17 @@ pub struct TransformUpdateState {
     /// node will not be clipped by clips that are transformed by this node.
     pub invertible: bool,
 
-    /// True if this node is a part of Preserve3D hierarchy.
-    pub preserves_3d: bool,
+    /// Current transform style.
+    pub transform_style: TransformStyle,
 }
 
+//TODO: remove this, just return the transform
 /// A processed relative transform between two nodes in the clip-scroll tree.
 #[derive(Debug, Default)]
-pub struct RelativeTransform {
+pub struct RelativeTransform<U> {
+    //TODO: use `FastTransform`
     /// The flattened transform, produces Z = 0 at all times.
-    pub flattened: LayoutTransform,
+    pub flattened: TypedTransform3D<f32, LayoutPixel, U>,
     /// Visible face of the original transform.
     pub visible_face: VisibleFace,
     /// True if the original transform had perspective.
@@ -158,57 +170,111 @@ impl ClipScrollTree {
 
     /// Calculate the relative transform from `child_index` to `parent_index`.
     /// This method will panic if the nodes are not connected!
+    ///
+    /// ## Flattening semantics
+    /// Flattening is the effect of ignoring the input primitive Z at the entrance
+    /// of a stacking context with "flat" transform style.
+    /// The implementation of it consists of the following blocks:
+    ///  1. reference frames with different transform styles are guaranteed to have different coordinate spaces
+    ///  2. before applying the transform of a "flat" style, we drop the Z components of the accumulated transform
+    ///  3. when we reach the coordinate space of the parent, we compare the distances to the space root
+    /// in order to know if there are any other "flat" style nodes in between (within that space),
+    /// dropping Z again if that's the case.
     pub fn get_relative_transform(
         &self,
         child_index: SpatialNodeIndex,
         parent_index: SpatialNodeIndex,
-    ) -> Option<RelativeTransform> {
+    ) -> RelativeTransform<LayoutPixel> {
         assert!(child_index.0 >= parent_index.0);
         let child = &self.spatial_nodes[child_index.0 as usize];
         let parent = &self.spatial_nodes[parent_index.0 as usize];
 
-        let mut coordinate_system_id = child.coordinate_system_id;
-        let mut transform = child.coordinate_system_relative_scale_offset.to_transform();
-        let mut visible_face = VisibleFace::Front;
-        let mut is_perspective = false;
-
-        while coordinate_system_id != parent.coordinate_system_id {
-            let coord_system = &self.coord_systems[coordinate_system_id.0 as usize];
-            coordinate_system_id = coord_system.parent.expect("invalid parent!");
-            transform = transform.post_mul(&coord_system.transform);
-            // we need to update the associated parameters of a transform in two cases:
-            // 1) when the flattening happens, so that we don't lose that original 3D aspects
-            // 2) when we reach the end of iteration, so that our result is up to date
-            if coord_system.is_flatten_root || coordinate_system_id == parent.coordinate_system_id {
-                visible_face = if transform.is_backface_visible() {
-                    VisibleFace::Back
-                } else {
-                    VisibleFace::Front
-                };
-                is_perspective = transform.has_perspective_component();
+        if child.coordinate_system_link.id == parent.coordinate_system_link.id {
+            // no flattening is needed, because the transform is purely 2D
+            return RelativeTransform {
+                flattened: parent.coordinate_system_relative_scale_offset
+                    .inverse()
+                    .accumulate(&child.coordinate_system_relative_scale_offset)
+                    .to_transform(),
+                visible_face: VisibleFace::Front,
+                is_perspective: false,
             }
-            if coord_system.is_flatten_root {
-                //Note: this function makes the transform to ignore the Z coordinate of inputs
-                // *even* for computing the X and Y coordinates of the output.
-                //transform = transform.project_to_2d();
+        }
+
+        let mut coordinate_system_link = child.coordinate_system_link;
+        let mut transform = child.coordinate_system_relative_scale_offset.to_transform();
+
+        while coordinate_system_link.id != parent.coordinate_system_link.id {
+            let coord_system = &self.coord_systems[coordinate_system_link.id.0 as usize];
+            if coord_system.transform_style == TransformStyle::Flat {
+                // zero out the produced Z by the accumulated transform,
+                // which is equivalent to dropping Z before applying the current transform
                 transform.m13 = 0.0;
                 transform.m23 = 0.0;
                 transform.m33 = 0.0;
                 transform.m43 = 0.0;
             }
+            coordinate_system_link = coord_system.parent.expect("invalid parent!");
+            transform = transform.post_mul(&coord_system.transform);
         }
 
-        transform = transform.post_mul(
+        // if there are any nodes within this coordinate space, and it's Flat-styled,
+        // we need to drop Z coordinate again.
+        if coordinate_system_link.depth != parent.coordinate_system_link.depth + 1 &&
+            parent.transform_style() == TransformStyle::Flat
+        {
+            transform.m13 = 0.0;
+            transform.m23 = 0.0;
+            transform.m33 = 0.0;
+            transform.m43 = 0.0;
+        }
+
+        let flattened = transform.post_mul(
             &parent.coordinate_system_relative_scale_offset
                 .inverse()
                 .to_transform()
         );
 
-        Some(RelativeTransform {
-            flattened: transform,
-            visible_face,
-            is_perspective,
-        })
+        RelativeTransform {
+            flattened,
+            visible_face: if transform.is_backface_visible() {
+                VisibleFace::Back
+            } else {
+                VisibleFace::Front
+            },
+            is_perspective: transform.has_perspective_component(),
+        }
+    }
+
+    /// Calculate the world space transform from `index`.
+    pub fn get_world_transform(
+        &self,
+        index: SpatialNodeIndex,
+    ) -> RelativeTransform<WorldPixel> {
+        let relative = self.get_relative_transform(index, ROOT_SPATIAL_NODE_INDEX);
+        RelativeTransform {
+            flattened: relative.flattened.with_destination::<WorldPixel>(),
+            visible_face: relative.visible_face,
+            is_perspective: relative.is_perspective,
+        }
+    }
+
+    pub fn compute_conservative_visible_rect(
+        &self,
+        index: SpatialNodeIndex,
+        world_rect: &WorldRect,
+        local_clip_rect: &LayoutRect,
+    ) -> LayoutRect {
+        match self
+            .get_world_transform(index)
+            .flattened
+            .inverse_rect_footprint(world_rect) //TODO: unapply
+        {
+            Some(layer_screen_rect) => local_clip_rect
+                .intersection(&layer_screen_rect)
+                .unwrap_or_else(LayoutRect::zero),
+            None => *local_clip_rect,
+        }
     }
 
     /// Map a rectangle in some child space to a parent.
@@ -228,12 +294,12 @@ impl ClipScrollTree {
         let child = &self.spatial_nodes[child_index.0 as usize];
         let parent = &self.spatial_nodes[parent_index.0 as usize];
 
-        let mut coordinate_system_id = child.coordinate_system_id;
+        let mut coordinate_system_id = child.coordinate_system_link.id;
         rect = child.coordinate_system_relative_scale_offset.map_rect(&rect);
 
-        while coordinate_system_id != parent.coordinate_system_id {
+        while coordinate_system_id != parent.coordinate_system_link.id {
             let coord_system = &self.coord_systems[coordinate_system_id.0 as usize];
-            coordinate_system_id = coord_system.parent.expect("invalid parent!");
+            coordinate_system_id = coord_system.parent.expect("invalid parent!").id;
             rect = project_rect(&coord_system.transform, &rect, parent_bounds)?;
         }
 
@@ -357,14 +423,9 @@ impl ClipScrollTree {
         &mut self,
         pan: WorldPoint,
         scene_properties: &SceneProperties,
-        mut transform_palette: Option<&mut TransformPalette>,
     ) {
         if self.spatial_nodes.is_empty() {
             return;
-        }
-
-        if let Some(ref mut palette) = transform_palette {
-            palette.allocate(self.spatial_nodes.len());
         }
 
         self.coord_systems.clear();
@@ -376,10 +437,13 @@ impl ClipScrollTree {
             parent_accumulated_scroll_offset: LayoutVector2D::zero(),
             nearest_scrolling_ancestor_offset: LayoutVector2D::zero(),
             nearest_scrolling_ancestor_viewport: LayoutRect::zero(),
-            current_coordinate_system_id: CoordinateSystemId::root(),
+            current_coordinate_system_link: CoordinateSystemLink {
+                id: CoordinateSystemId::root(),
+                depth: 0,
+            },
             coordinate_system_relative_scale_offset: ScaleOffset::identity(),
             invertible: true,
-            preserves_3d: false,
+            transform_style: TransformStyle::Flat,
         };
         debug_assert!(self.nodes_to_update.is_empty());
         self.nodes_to_update.push((root_node_index, state));
@@ -392,9 +456,6 @@ impl ClipScrollTree {
             };
 
             node.update(&mut state, &mut self.coord_systems, scene_properties, &*previous);
-            if let Some(ref mut palette) = transform_palette {
-                node.push_gpu_data(palette, node_index);
-            }
 
             if !node.children.is_empty() {
                 node.prepare_state_for_children(&mut state);
@@ -405,6 +466,17 @@ impl ClipScrollTree {
                 );
             }
         }
+    }
+
+    pub fn build_transform_palette(&self) -> TransformPalette {
+        let mut palette = TransformPalette::new(self.spatial_nodes.len());
+        for i in 0 .. self.spatial_nodes.len() {
+            let node_index = SpatialNodeIndex(i as u32);
+            let world = self.get_world_transform(node_index);
+            println!("{:?} -> {:?}", node_index, world); // TEMP
+            palette.set_world_transform(node_index, world.flattened);
+        }
+        palette
     }
 
     pub fn finalize_and_apply_pending_scroll_offsets(&mut self, old_states: ScrollStates) {
@@ -524,8 +596,9 @@ impl ClipScrollTree {
         }
 
         pt.add_item(format!("world_viewport_transform: {:?}", node.world_viewport_transform));
-        pt.add_item(format!("world_content_transform: {:?}", node.world_content_transform));
-        pt.add_item(format!("coordinate_system_id: {:?}", node.coordinate_system_id));
+        pt.add_item(format!("world_content_transform: {:?}", node.world_content_transform_deprecated));
+        pt.add_item(format!("coordinate_system_id: {:?}", node.coordinate_system_link.id));
+        pt.add_item(format!("coordinate_system_depth: {:?}", node.coordinate_system_link.depth));
 
         for child_index in &node.children {
             self.print_node(*child_index, pt);
@@ -594,6 +667,64 @@ impl PrintableTree for ClipScrollTree {
     }
 }
 
+#[cfg(feature = "capture")]
+#[derive(Serialize)]
+pub struct DebugCoordinateSystem {
+    id: CoordinateSystemId,
+    parent_depth: u32,
+    style: TransformStyle,
+    transform: LayoutTransform,
+    children: Vec<DebugCoordinateSystem>,
+}
+
+#[cfg(feature = "capture")]
+impl DebugCoordinateSystem {
+    fn find(&mut self, id: CoordinateSystemId) -> Option<&mut Self> {
+        if id == self.id {
+            Some(self)
+        } else {
+            self.children.iter_mut().find_map(|dcs| dcs.find(id))
+        }
+    }
+}
+
+#[cfg(feature = "capture")]
+impl ClipScrollTree {
+    pub fn debug_coordinate_systems(&self) -> DebugCoordinateSystem {
+        let mut root = DebugCoordinateSystem {
+            id: CoordinateSystemId(0),
+            parent_depth: 0,
+            style: TransformStyle::Flat,
+            transform: LayoutTransform::identity(),
+            children: Vec::new(),
+        };
+
+        for (i, cs) in self.coord_systems.iter().enumerate().skip(1) {
+            match cs.parent {
+                Some(link) => match root.find(link.id) {
+                    Some(dcs) => {
+                        dcs.children.push(DebugCoordinateSystem {
+                            id: CoordinateSystemId(i as u32),
+                            parent_depth: link.depth,
+                            style: cs.transform_style,
+                            transform: cs.transform,
+                            children: Vec::new(),
+                        });
+                    }
+                    None => {
+                        warn!("unable to find {:?}", link);
+                    }
+                },
+                None => {
+                    warn!("expected parent for {:?}", cs);
+                }
+            }
+        }
+
+        root
+    }
+}
+
 #[cfg(test)]
 fn add_reference_frame(
     cst: &mut ClipScrollTree,
@@ -625,7 +756,7 @@ fn test_pt(
     const EPSILON: f32 = 0.0001;
 
     let p = LayoutPoint::new(px, py);
-    let m = cst.get_relative_transform(child, parent).unwrap().flattened;
+    let m = cst.get_relative_transform(child, parent).flattened;
     let pt = m.transform_point2d(&p).unwrap();
     assert!(pt.x.approx_eq_eps(&expected_x, &EPSILON) &&
             pt.y.approx_eq_eps(&expected_y, &EPSILON),
