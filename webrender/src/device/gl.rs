@@ -1297,28 +1297,25 @@ impl Device {
         // GL_EXT_texture_storage and GL_EXT_texture_format_BGRA8888.
         let supports_gles_bgra = supports_extension(&extensions, "GL_EXT_texture_format_BGRA8888");
 
-        let (preferred_color_input_format, bgra_format_internal, bgra_format_external, bgra_swizzle, texture_storage_usage) = match gl.get_type() {
+        let (color_formats, bgra_formats, bgra_swizzle, texture_storage_usage) = match gl.get_type() {
             // There is `glTexStorage`, use it and expect RGBA on the input.
             gl::GlType::Gl if allow_texture_storage_support && supports_extension(&extensions, "GL_ARB_texture_storage") => (
-                ImageFormat::RGBA8,
-                gl::RGBA8,
-                gl::RGBA,
+                TextureFormatPair::from(ImageFormat::RGBA8),
+                TextureFormatPair { internal: gl::RGBA8, external: gl::RGBA },
                 Swizzle::Bgra, // pretend it's RGBA, rely on swizzling
                 TexStorageUsage::Always
             ),
             // There is no `glTexStorage`, upload as `glTexImage` with BGRA input.
             gl::GlType::Gl => (
-                ImageFormat::BGRA8,
-                gl::RGBA,
-                gl::BGRA,
+                TextureFormatPair { internal: ImageFormat::RGBA8, external: ImageFormat::BGRA8 },
+                TextureFormatPair { internal: gl::RGBA, external: gl::BGRA },
                 Swizzle::Rgba, // converted on uploads by the driver, no swizzling needed
                 TexStorageUsage::Never
             ),
             // We can use glTexStorage with BGRA8 as the internal format.
             gl::GlType::Gles if supports_gles_bgra && allow_texture_storage_support && supports_extension(&extensions, "GL_EXT_texture_storage") => (
-                ImageFormat::BGRA8,
-                gl::BGRA8_EXT,
-                gl::BGRA_EXT,
+                TextureFormatPair::from(ImageFormat::BGRA8),
+                TextureFormatPair { internal: gl::BGRA8_EXT, external: gl::BGRA_EXT },
                 Swizzle::Rgba, // no conversion needed
                 TexStorageUsage::Always,
             ),
@@ -1327,25 +1324,23 @@ impl Device {
             // use it for other formats.
             // We can't use glTexStorage with BGRA8 as the internal format.
             gl::GlType::Gles if supports_gles_bgra => (
-                ImageFormat::BGRA8,
-                gl::BGRA_EXT,
-                gl::BGRA_EXT,
+                TextureFormatPair::from(ImageFormat::RGBA8),
+                TextureFormatPair::from(gl::BGRA_EXT),
                 Swizzle::Rgba, // no conversion needed
                 TexStorageUsage::NonBGRA8,
             ),
             // BGRA is not supported as an internal format, therefore we will
             // use RGBA. The swizzling will happen at the texture unit.
             gl::GlType::Gles => (
-                ImageFormat::RGBA8,
-                gl::RGBA8,
-                gl::RGBA,
+                TextureFormatPair::from(ImageFormat::RGBA8),
+                TextureFormatPair { internal: gl::RGBA8, external: gl::RGBA },
                 Swizzle::Bgra, // pretend it's RGBA, rely on swizzling
                 TexStorageUsage::Always,
             ),
         };
 
-        info!("GL uploads preferred {:?}, bgra internal {:?} external {:?}, swizzle {:?}, texture storage {:?}",
-            preferred_color_input_format, bgra_format_internal, bgra_format_external, bgra_swizzle, texture_storage_usage);
+        info!("GL texture cache {:?}, bgra {:?} swizzle {:?}, texture storage {:?}",
+            color_formats, bgra_formats, bgra_swizzle, texture_storage_usage);
         let supports_copy_image_sub_data = supports_extension(&extensions, "GL_EXT_copy_image") ||
             supports_extension(&extensions, "GL_ARB_copy_image");
 
@@ -1398,14 +1393,8 @@ impl Device {
                 supports_khr_debug,
             },
 
-            color_formats: TextureFormatPair {
-                internal: ImageFormat::RGBA8,
-                external: preferred_color_input_format,
-            },
-            bgra_formats: TextureFormatPair {
-                internal: bgra_format_internal,
-                external: bgra_format_external,
-            },
+            color_formats,
+            bgra_formats,
             bgra_swizzle,
 
             depth_targets: FastHashMap::default(),
