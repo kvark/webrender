@@ -626,6 +626,37 @@ impl Drop for Texture {
     }
 }
 
+/// WebRender interface to a special OpenGL texture that is only used for copying.
+///
+/// Because freeing a texture requires various device handles that are not
+/// reachable from this struct, manual destruction via `Device` is required.
+/// Our `Drop` implementation asserts that this has happened.
+#[derive(Debug)]
+pub struct StagingTexture {
+    id: gl::GLuint,
+    target: gl::GLuint,
+    format: ImageFormat,
+    size: DeviceIntSize,
+}
+
+impl StagingTexture {
+    /// Returns the number of bytes (generally in GPU memory) that this texture
+    /// consumes.
+    pub fn size_in_bytes(&self) -> usize {
+        let bpp = self.format.bytes_per_pixel() as usize;
+        let w = self.size.width as usize;
+        let h = self.size.height as usize;
+        bpp * w * h
+    }
+}
+
+impl Drop for StagingTexture {
+    fn drop(&mut self) {
+        debug_assert!(thread::panicking() || self.id == 0);
+    }
+}
+
+
 pub struct Program {
     id: gl::GLuint,
     u_transform: gl::GLint,
@@ -2064,6 +2095,52 @@ impl Device {
         texture
     }
 
+    pub fn create_staging_texture(
+        &mut self,
+        format: ImageFormat,
+    ) -> StagingTexture {
+        assert!(self.capabilities.supports_copy_image_sub_data);
+        debug_assert!(self.inside_frame);
+
+        let texture = StagingTexture {
+            id: self.gl.gen_textures(1)[0],
+            target: gl::TEXTURE_2D,
+            size: DeviceIntSize::zero(),
+            format,
+        };
+
+        self.bind_texture_impl(DEFAULT_TEXTURE.into(), texture.id, texture.target, None);
+        self.set_texture_parameters(texture.target, TextureFilter::Nearest); // shouldn't be needed
+
+        texture
+    }
+
+    pub fn reset_staging_texture<T: Copy>(&mut self, texture: &mut StagingTexture, width: i32, height: i32, data: &[T]) {
+        record_gpu_free(texture.size_in_bytes());
+        texture.size = DeviceIntSize::new(width, height);
+        record_gpu_alloc(texture.size_in_bytes());
+
+        let data_u8 = unsafe {
+            slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * mem::size_of::<T>())
+        };
+
+        // Re-allocate storage.
+        let desc = self.gl_describe_format(texture.format);
+
+        self.bind_texture_impl(DEFAULT_TEXTURE.into(), texture.id, texture.target, None);
+        self.gl.tex_image_2d(
+            texture.target,
+            0,
+            desc.internal as gl::GLint,
+            width as gl::GLint,
+            height as gl::GLint,
+            0,
+            desc.external,
+            desc.pixel_type,
+            Some(data_u8),
+        );
+    }
+
     fn set_texture_parameters(&mut self, target: gl::GLuint, filter: TextureFilter) {
         let mag_filter = match filter {
             TextureFilter::Nearest => gl::NEAREST,
@@ -2125,6 +2202,25 @@ impl Device {
             self.reset_draw_target();
             self.reset_read_target();
         }
+    }
+
+    /// Copy a 2D sub-region from one 2D texture into another
+    pub fn copy_from_staging_texture(
+        &mut self,
+        dst: &Texture,
+        dst_offset: DeviceIntPoint,
+        src: &StagingTexture,
+        src_offset: DeviceIntPoint,
+        extent: DeviceIntSize,
+    ) {
+        unsafe {
+            self.gl.copy_image_sub_data(
+                src.id, src.target, 0,
+                src_offset.x, src_offset.y, 0,
+                dst.id, dst.target, 0,
+                dst_offset.x, dst_offset.y, 0,
+                extent.width as _, extent.height as _, 1);
+            }
     }
 
     /// Notifies the device that the contents of a render target are no longer
@@ -2417,6 +2513,15 @@ impl Device {
         }
 
         // Disarm the assert in Texture::drop().
+        texture.id = 0;
+    }
+
+    pub fn delete_staging_texture(&mut self, mut texture: StagingTexture) {
+        debug_assert!(self.inside_frame);
+        record_gpu_free(texture.size_in_bytes());
+        self.gl.delete_textures(&[texture.id]);
+
+        // Disarm the assert in StagingTexture::drop().
         texture.id = 0;
     }
 

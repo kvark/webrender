@@ -49,7 +49,7 @@ use crate::batch::{AlphaBatchContainer, BatchKind, BatchFeatures, BatchTextures,
 use crate::capture::{CaptureConfig, ExternalCaptureImage, PlainExternalImage};
 use crate::debug_colors;
 use crate::debug_render::{DebugItem, DebugRenderer};
-use crate::device::{DepthFunction, Device, GpuFrameId, Program, UploadMethod, Texture, PBO};
+use crate::device::{DepthFunction, Device, GpuFrameId, Program, UploadMethod, StagingTexture, Texture, PBO};
 use crate::device::{DrawTarget, ExternalTexture, FBOId, ReadTarget, TextureSlot};
 use crate::device::{ShaderError, TextureFilter, TextureFlags,
              VertexUsageHint, VAO, VBO, CustomVAO};
@@ -1219,6 +1219,13 @@ enum GpuCacheBus {
         /// Per-row data.
         rows: Vec<CacheRow>,
     },
+    /// Update via a staging texture.
+    StagingTexture {
+        /// Texture used to temporarily store the rows.
+        texture: StagingTexture,
+        /// Per-row data.
+        rows: Vec<CacheRow>,
+    },
     /// Shader-based scattering updates. Currently rendered by a set
     /// of points into the GPU texture, each carrying a `GpuBlockData`.
     Scatter {
@@ -1242,7 +1249,6 @@ struct GpuCacheTexture {
 }
 
 impl GpuCacheTexture {
-
     /// Ensures that we have an appropriately-sized texture. Returns true if a
     /// new texture was created.
     fn ensure_texture(&mut self, device: &mut Device, height: i32) {
@@ -1294,6 +1300,7 @@ impl GpuCacheTexture {
     }
 
     fn new(device: &mut Device, use_scatter: bool) -> Result<Self, RendererError> {
+        let use_staging = true; //TODO: configure
         let bus = if use_scatter {
             let program = device.create_program_linked(
                 "gpu_cache_update",
@@ -1314,6 +1321,12 @@ impl GpuCacheTexture {
                 buf_position,
                 buf_value,
                 count: 0,
+            }
+        } else if use_staging {
+            let texture = device.create_staging_texture(ImageFormat::RGBAF32);
+            GpuCacheBus::StagingTexture {
+                texture,
+                rows: Vec::new(),
             }
         } else {
             let buffer = device.create_pbo();
@@ -1337,6 +1350,9 @@ impl GpuCacheTexture {
             GpuCacheBus::PixelBuffer { buffer, ..} => {
                 device.delete_pbo(buffer);
             }
+            GpuCacheBus::StagingTexture { texture, ..} => {
+                device.delete_staging_texture(texture);
+            }
             GpuCacheBus::Scatter { program, vao, buf_position, buf_value, ..} => {
                 device.delete_program(program);
                 device.delete_custom_vao(vao);
@@ -1358,7 +1374,8 @@ impl GpuCacheTexture {
     ) {
         self.ensure_texture(device, max_height);
         match self.bus {
-            GpuCacheBus::PixelBuffer { .. } => {},
+            GpuCacheBus::PixelBuffer { .. } |
+            GpuCacheBus::StagingTexture { .. } => {},
             GpuCacheBus::Scatter {
                 ref mut buf_position,
                 ref mut buf_value,
@@ -1376,7 +1393,8 @@ impl GpuCacheTexture {
 
     fn update(&mut self, device: &mut Device, updates: &GpuCacheUpdateList) {
         match self.bus {
-            GpuCacheBus::PixelBuffer { ref mut rows, .. } => {
+            GpuCacheBus::PixelBuffer { ref mut rows, .. } |
+            GpuCacheBus::StagingTexture { ref mut rows, .. } => {
                 for update in &updates.updates {
                     match *update {
                         GpuCacheUpdate::Copy {
@@ -1443,7 +1461,7 @@ impl GpuCacheTexture {
     }
 
     fn flush(&mut self, device: &mut Device) -> usize {
-        let texture = self.texture.as_ref().unwrap();
+        let gpu_texture = self.texture.as_ref().unwrap();
         match self.bus {
             GpuCacheBus::PixelBuffer { ref buffer, ref mut rows } => {
                 let rows_dirty = rows
@@ -1455,7 +1473,7 @@ impl GpuCacheTexture {
                 }
 
                 let mut uploader = device.upload_texture(
-                    texture,
+                    gpu_texture,
                     buffer,
                     rows_dirty * MAX_VERTEX_TEXTURE_WIDTH,
                 );
@@ -1477,6 +1495,40 @@ impl GpuCacheTexture {
 
                 rows_dirty
             }
+            GpuCacheBus::StagingTexture { ref mut texture, ref mut rows } => {
+                let rows_dirty = rows
+                    .iter()
+                    .filter(|row| row.is_dirty)
+                    .count();
+                if rows_dirty == 0 {
+                    return 0
+                }
+
+                for (row_index, row) in rows.iter_mut().enumerate() {
+                    if !row.is_dirty {
+                        continue;
+                    }
+
+                    device.reset_staging_texture(
+                        texture,
+                        MAX_VERTEX_TEXTURE_WIDTH as i32,
+                        1,
+                        &*row.cpu_blocks,
+                    );
+
+                    device.copy_from_staging_texture(
+                        gpu_texture,
+                        DeviceIntPoint::new(0, row_index as i32),
+                        texture,
+                        DeviceIntPoint::zero(),
+                        DeviceIntSize::new(MAX_VERTEX_TEXTURE_WIDTH as i32, 1),
+                    );
+
+                    row.is_dirty = false;
+                }
+
+                rows_dirty
+            }
             GpuCacheBus::Scatter { ref program, ref vao, count, .. } => {
                 device.disable_depth();
                 device.set_blend(false);
@@ -1484,7 +1536,7 @@ impl GpuCacheTexture {
                 device.bind_custom_vao(vao);
                 device.bind_draw_target(
                     DrawTarget::from_texture(
-                        texture,
+                        gpu_texture,
                         0,
                         false,
                     ),
@@ -2717,7 +2769,8 @@ impl Renderer {
             | DebugCommand::SimulateLongLowPrioritySceneBuild(_) => {}
             DebugCommand::InvalidateGpuCache => {
                 match self.gpu_cache_texture.bus {
-                    GpuCacheBus::PixelBuffer { ref mut rows, .. } => {
+                    GpuCacheBus::PixelBuffer { ref mut rows, .. } |
+                    GpuCacheBus::StagingTexture { ref mut rows, .. } => {
                         info!("Invalidating GPU caches");
                         for row in rows {
                             row.is_dirty = true;
@@ -5278,10 +5331,14 @@ impl Renderer {
         let mut report = MemoryReport::default();
 
         // GPU cache CPU memory.
-        if let GpuCacheBus::PixelBuffer{ref rows, ..} = self.gpu_cache_texture.bus {
-            for row in rows.iter() {
-                report.gpu_cache_cpu_mirror += self.size_of(&*row.cpu_blocks as *const _);
+        match self.gpu_cache_texture.bus {
+            GpuCacheBus::PixelBuffer { ref rows, .. } |
+            GpuCacheBus::StagingTexture { ref rows, .. } => {
+                for row in rows.iter() {
+                    report.gpu_cache_cpu_mirror += self.size_of(&*row.cpu_blocks as *const _);
+                }
             }
+            GpuCacheBus::Scatter { .. } => {}
         }
 
         // GPU cache GPU memory.
@@ -5993,7 +6050,8 @@ impl Renderer {
             );
             self.gpu_cache_texture.texture = Some(t);
             match self.gpu_cache_texture.bus {
-                GpuCacheBus::PixelBuffer { ref mut rows, .. } => {
+                GpuCacheBus::PixelBuffer { ref mut rows, .. } |
+                GpuCacheBus::StagingTexture { ref mut rows, .. } => {
                     let dim = self.gpu_cache_texture.texture.as_ref().unwrap().get_dimensions();
                     let blocks = unsafe {
                         slice::from_raw_parts(
