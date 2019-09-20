@@ -2099,7 +2099,6 @@ impl Device {
         &mut self,
         format: ImageFormat,
     ) -> StagingTexture {
-        assert!(self.capabilities.supports_copy_image_sub_data);
         debug_assert!(self.inside_frame);
 
         let texture = StagingTexture {
@@ -2214,13 +2213,25 @@ impl Device {
         extent: DeviceIntSize,
     ) {
         unsafe {
-            self.gl.copy_image_sub_data(
-                src.id, src.target, 0,
-                src_offset.x, src_offset.y, 0,
-                dst.id, dst.target, 0,
-                dst_offset.x, dst_offset.y, 0,
-                extent.width as _, extent.height as _, 1);
+            if self.capabilities.supports_copy_image_sub_data {
+                self.gl.copy_image_sub_data(
+                    src.id, src.target, 0,
+                    src_offset.x, src_offset.y, 0,
+                    dst.id, dst.target, 0,
+                    dst_offset.x, dst_offset.y, 0,
+                    extent.width as _, extent.height as _, 1,
+                );
+            } else {
+                self.gl.copy_sub_texture_chromium(
+                    src.id, 0,
+                    dst.target, dst.id, 0,
+                    dst_offset.x, dst_offset.y,
+                    src_offset.x, src_offset.y,
+                    extent.width as _, extent.height as _,
+                    0, 0, 0,
+                );
             }
+        }
     }
 
     /// Notifies the device that the contents of a render target are no longer

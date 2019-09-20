@@ -1302,6 +1302,7 @@ impl GpuCacheTexture {
     fn new(device: &mut Device, use_scatter: bool) -> Result<Self, RendererError> {
         let use_staging = true; //TODO: configure
         let bus = if use_scatter {
+            println!("GPU Cache: Scatter"); //TEMP
             let program = device.create_program_linked(
                 "gpu_cache_update",
                 String::new(),
@@ -1323,12 +1324,14 @@ impl GpuCacheTexture {
                 count: 0,
             }
         } else if use_staging {
+            println!("GPU Cache: StagingTexture"); //TEMP
             let texture = device.create_staging_texture(ImageFormat::RGBAF32);
             GpuCacheBus::StagingTexture {
                 texture,
                 rows: Vec::new(),
             }
         } else {
+            println!("GPU Cache: PixelBuffer"); //TEMP
             let buffer = device.create_pbo();
             GpuCacheBus::PixelBuffer {
                 buffer,
