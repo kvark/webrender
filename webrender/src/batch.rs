@@ -28,9 +28,9 @@ use crate::render_task::RenderTaskAddress;
 use crate::renderer::{BlendMode, ImageBufferKind, ShaderColorMode};
 use crate::renderer::{BLOCKS_PER_UV_RECT, MAX_VERTEX_TEXTURE_WIDTH};
 use crate::resource_cache::{CacheItem, GlyphFetchResult, ImageRequest, ResourceCache};
-use smallvec::SmallVec;
-use std::{f32, i32, usize};
 use crate::util::{project_rect, TransformedRectKind};
+use smallvec::SmallVec;
+use std::{f32, i32, usize, ops};
 
 // Special sentinel value recognized by the shader. It is considered to be
 // a dummy task that doesn't mask out anything.
@@ -173,210 +173,71 @@ fn textures_compatible(t1: TextureSource, t2: TextureSource) -> bool {
     t1 == TextureSource::Invalid || t2 == TextureSource::Invalid || t1 == t2
 }
 
-pub struct AlphaBatchList {
-    pub batches: Vec<PrimitiveBatch>,
-    pub item_rects: Vec<Vec<PictureRect>>,
-    current_batch_index: usize,
-    current_z_id: ZBufferId,
-    break_advanced_blend_batches: bool,
-    lookback_count: usize,
-}
+type InstanceIndex = u32;
+type InstanceArrayIndex = u8;
 
-impl AlphaBatchList {
-    fn new(break_advanced_blend_batches: bool, lookback_count: usize) -> Self {
-        AlphaBatchList {
-            batches: Vec::new(),
-            item_rects: Vec::new(),
-            current_z_id: ZBufferId::invalid(),
-            current_batch_index: usize::MAX,
-            break_advanced_blend_batches,
-            lookback_count,
-        }
-    }
-
-    /// Clear all current batches in this list. This is typically used
-    /// when a primitive is encountered that occludes all previous
-    /// content in this batch list.
-    fn clear(&mut self) {
-        self.current_batch_index = usize::MAX;
-        self.current_z_id = ZBufferId::invalid();
-        self.batches.clear();
-        self.item_rects.clear();
-    }
-
-    pub fn set_params_and_get_batch(
-        &mut self,
-        key: BatchKey,
-        features: BatchFeatures,
-        // The bounding box of everything at this Z plane. We expect potentially
-        // multiple primitive segments coming with the same `z_id`.
-        z_bounding_rect: &PictureRect,
-        z_id: ZBufferId,
-    ) -> &mut Vec<PrimitiveInstanceData> {
-        if z_id != self.current_z_id ||
-           self.current_batch_index == usize::MAX ||
-           !self.batches[self.current_batch_index].key.is_compatible_with(&key)
-        {
-            let mut selected_batch_index = None;
-
-            match key.blend_mode {
-                BlendMode::SubpixelWithBgColor => {
-                    'outer_multipass: for (batch_index, batch) in self.batches.iter().enumerate().rev().take(self.lookback_count) {
-                        // Some subpixel batches are drawn in two passes. Because of this, we need
-                        // to check for overlaps with every batch (which is a bit different
-                        // than the normal batching below).
-                        for item_rect in &self.item_rects[batch_index] {
-                            if item_rect.intersects(z_bounding_rect) {
-                                break 'outer_multipass;
-                            }
-                        }
-
-                        if batch.key.is_compatible_with(&key) {
-                            selected_batch_index = Some(batch_index);
-                            break;
-                        }
-                    }
-                }
-                BlendMode::Advanced(_) if self.break_advanced_blend_batches => {
-                    // don't try to find a batch
-                }
-                _ => {
-                    'outer_default: for (batch_index, batch) in self.batches.iter().enumerate().rev().take(self.lookback_count) {
-                        // For normal batches, we only need to check for overlaps for batches
-                        // other than the first batch we consider. If the first batch
-                        // is compatible, then we know there isn't any potential overlap
-                        // issues to worry about.
-                        if batch.key.is_compatible_with(&key) {
-                            selected_batch_index = Some(batch_index);
-                            break;
-                        }
-
-                        // check for intersections
-                        for item_rect in &self.item_rects[batch_index] {
-                            if item_rect.intersects(z_bounding_rect) {
-                                break 'outer_default;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if selected_batch_index.is_none() {
-                let new_batch = PrimitiveBatch::new(key);
-                selected_batch_index = Some(self.batches.len());
-                self.batches.push(new_batch);
-                self.item_rects.push(Vec::new());
-            }
-
-            self.current_batch_index = selected_batch_index.unwrap();
-            self.item_rects[self.current_batch_index].push(*z_bounding_rect);
-            self.current_z_id = z_id;
-        } else if cfg!(debug_assertions) {
-            // If it's a different segment of the same (larger) primitive, we expect the bounding box
-            // to be the same - coming from the primitive itself, not the segment.
-            assert_eq!(self.item_rects[self.current_batch_index].last(), Some(z_bounding_rect));
-        }
-
-        let batch = &mut self.batches[self.current_batch_index];
-        batch.features |= features;
-
-        &mut batch.instances
-    }
-}
-
-pub struct OpaqueBatchList {
-    pub pixel_area_threshold_for_new_batch: f32,
-    pub batches: Vec<PrimitiveBatch>,
-    pub current_batch_index: usize,
-    lookback_count: usize,
-}
-
-impl OpaqueBatchList {
-    fn new(pixel_area_threshold_for_new_batch: f32, lookback_count: usize) -> Self {
-        OpaqueBatchList {
-            batches: Vec::new(),
-            pixel_area_threshold_for_new_batch,
-            current_batch_index: usize::MAX,
-            lookback_count,
-        }
-    }
-
-    /// Clear all current batches in this list. This is typically used
-    /// when a primitive is encountered that occludes all previous
-    /// content in this batch list.
-    fn clear(&mut self) {
-        self.current_batch_index = usize::MAX;
-        self.batches.clear();
-    }
-
-    pub fn set_params_and_get_batch(
-        &mut self,
-        key: BatchKey,
-        features: BatchFeatures,
-        // The bounding box of everything at the current Z, whatever it is. We expect potentially
-        // multiple primitive segments produced by a primitive, which we allow to check
-        // `current_batch_index` instead of iterating the batches.
-        z_bounding_rect: &PictureRect,
-    ) -> &mut Vec<PrimitiveInstanceData> {
-        if self.current_batch_index == usize::MAX ||
-           !self.batches[self.current_batch_index].key.is_compatible_with(&key) {
-            let mut selected_batch_index = None;
-            let item_area = z_bounding_rect.size.area();
-
-            // If the area of this primitive is larger than the given threshold,
-            // then it is large enough to warrant breaking a batch for. In this
-            // case we just see if it can be added to the existing batch or
-            // create a new one.
-            if item_area > self.pixel_area_threshold_for_new_batch {
-                if let Some(batch) = self.batches.last() {
-                    if batch.key.is_compatible_with(&key) {
-                        selected_batch_index = Some(self.batches.len() - 1);
-                    }
-                }
-            } else {
-                // Otherwise, look back through a reasonable number of batches.
-                for (batch_index, batch) in self.batches.iter().enumerate().rev().take(self.lookback_count) {
-                    if batch.key.is_compatible_with(&key) {
-                        selected_batch_index = Some(batch_index);
-                        break;
-                    }
-                }
-            }
-
-            if selected_batch_index.is_none() {
-                let new_batch = PrimitiveBatch::new(key);
-                selected_batch_index = Some(self.batches.len());
-                self.batches.push(new_batch);
-            }
-
-            self.current_batch_index = selected_batch_index.unwrap();
-        }
-
-        let batch = &mut self.batches[self.current_batch_index];
-        batch.features |= features;
-
-        &mut batch.instances
-    }
-
-    fn finalize(&mut self) {
-        // Reverse the instance arrays in the opaque batches
-        // to get maximum z-buffer efficiency by drawing
-        // front-to-back.
-        // TODO(gw): Maybe we can change the batch code to
-        //           build these in reverse and avoid having
-        //           to reverse the instance array here.
-        for batch in &mut self.batches {
-            batch.instances.reverse();
-        }
-    }
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "capture", derive(Serialize))]
+#[cfg_attr(feature = "replay", derive(Deserialize))]
+pub(crate) struct InstanceRange {
+    pub array_index: InstanceArrayIndex,
+    pub chunk_index: u16,
 }
 
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
-pub struct PrimitiveBatch {
-    pub key: BatchKey,
-    pub instances: Vec<PrimitiveInstanceData>,
-    pub features: BatchFeatures,
+pub(crate) struct InstanceArray {
+    /// Raw array of instance datas.
+    pub data: Vec<PrimitiveInstanceData>,
+    /// Start instance index per chunk.
+    ///
+    /// Chunk `i` occupies instance space in this array
+    /// in range `start_indices[i] .. start_indices[i+1]`.
+    pub start_indices: Vec<InstanceIndex>,
+}
+
+#[cfg_attr(feature = "capture", derive(Serialize))]
+#[cfg_attr(feature = "replay", derive(Deserialize))]
+pub struct InstanceStorage {
+    pub(crate) arrays: Box<[InstanceArray]>,
+}
+
+impl InstanceStorage {
+    //TODO: I wonder if it can decide to start new arrays automatically?
+    pub(crate) fn new(array_count: usize) -> Self {
+        InstanceStorage {
+            arrays: (0..array_count)
+                .map(|_| InstanceArray {
+                    data: Vec::new(),
+                    start_indices: Vec::new(),
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        }
+    }
+    /// Start a new instance range in one of the arrays.
+    fn next_range(&mut self, avaliable_mask: u32, default_index: InstanceArrayIndex) -> InstanceRange {
+        let mut array_index = avaliable_mask.trailing_zeros() as InstanceArrayIndex;
+        if (array_index as usize) >= self.arrays.len() {
+            array_index = default_index;
+        }
+        let array = &mut self.arrays[array_index as usize];
+        let chunk_index = array.start_indices.len() as u16;
+        array.start_indices.push(array.data.len() as InstanceIndex);
+        InstanceRange {
+            array_index,
+            chunk_index,
+        }
+    }
+}
+
+impl ops::Index<InstanceRange> for InstanceStorage {
+    type Output = [InstanceIndex];
+    fn index(&self, range: InstanceRange) -> &[InstanceIndex] {
+        &self
+            .arrays[range.array_index as usize]
+            .start_indices[range.chunk_index as usize ..]
+    }
 }
 
 bitflags! {
@@ -397,18 +258,251 @@ bitflags! {
     }
 }
 
+#[cfg_attr(feature = "capture", derive(Serialize))]
+#[cfg_attr(feature = "replay", derive(Deserialize))]
+pub struct PrimitiveBatch {
+    pub key: BatchKey,
+    pub(crate) instances: InstanceRange,
+    pub features: BatchFeatures,
+}
+
 impl PrimitiveBatch {
-    fn new(key: BatchKey) -> PrimitiveBatch {
+    fn new(key: BatchKey, instances: InstanceRange) -> Self {
         PrimitiveBatch {
             key,
-            instances: Vec::new(),
+            instances,
             features: BatchFeatures::empty(),
         }
     }
+}
 
-    fn merge(&mut self, other: PrimitiveBatch) {
-        self.instances.extend(other.instances);
-        self.features |= other.features;
+pub struct AlphaBatchList {
+    pub batches: Vec<PrimitiveBatch>,
+    pub item_rects: Vec<Vec<PictureRect>>,
+    current_batch_index: usize,
+    current_z_id: ZBufferId,
+    break_advanced_blend_batches: bool,
+    lookback_count: usize,
+}
+
+impl AlphaBatchList {
+    fn new(
+        break_advanced_blend_batches: bool,
+        lookback_count: usize,
+    ) -> Self {
+        AlphaBatchList {
+            batches: Vec::new(),
+            item_rects: Vec::new(),
+            current_z_id: ZBufferId::invalid(),
+            current_batch_index: usize::MAX,
+            break_advanced_blend_batches,
+            lookback_count,
+        }
+    }
+
+    /// Clear all current batches in this list. This is typically used
+    /// when a primitive is encountered that occludes all previous
+    /// content in this batch list.
+    fn clear(&mut self) {
+        self.current_batch_index = usize::MAX;
+        self.current_z_id = ZBufferId::invalid();
+        self.batches.clear();
+        self.item_rects.clear();
+    }
+
+    pub fn set_params_and_get_batch<'a>(
+        &mut self,
+        key: BatchKey,
+        features: BatchFeatures,
+        // The bounding box of everything at this Z plane. We expect potentially
+        // multiple primitive segments coming with the same `z_id`.
+        z_bounding_rect: &PictureRect,
+        z_id: ZBufferId,
+        storage: &'a mut InstanceStorage,
+    ) -> &'a mut Vec<PrimitiveInstanceData> {
+        if z_id != self.current_z_id ||
+            self.batches
+            .get(self.current_batch_index)
+            .map_or(true, |b| !b.key.is_compatible_with(&key))
+        {
+            let mut selected_batch_index = None;
+            let mut last_array_index = 0;
+            let mut array_mask = 0;
+
+            match key.blend_mode {
+                BlendMode::SubpixelWithBgColor => {
+                    for (batch_index, (batch, item_rects)) in self.batches.iter().zip(self.item_rects.iter()).enumerate().rev().take(self.lookback_count) {
+                        // Some subpixel batches are drawn in two passes. Because of this, we need
+                        // to check for overlaps with every batch (which is a bit different
+                        // than the normal batching below).
+                        if item_rects.iter().any(|r| r.intersects(z_bounding_rect)) {
+                            break;
+                        }
+                        let bit = 1 << batch.instances.array_index;
+                        if array_mask & bit == 0 {
+                            array_mask |= bit;
+                            if batch.key.is_compatible_with(&key) {
+                                selected_batch_index = Some(batch_index);
+                                break;
+                            }
+                        }
+                        last_array_index = batch.instances.array_index;
+                    }
+                }
+                BlendMode::Advanced(_) if self.break_advanced_blend_batches => {
+                    // don't try to find a batch
+                }
+                _ => {
+                    for (batch_index, (batch, item_rects)) in self.batches.iter().zip(self.item_rects.iter()).enumerate().rev().take(self.lookback_count) {
+                        // For normal batches, we only need to check for overlaps for batches
+                        // other than the first batch we consider. If the first batch
+                        // is compatible, then we know there isn't any potential overlap
+                        // issues to worry about.
+                        let bit = 1 << batch.instances.array_index;
+                        if array_mask & bit == 0 {
+                            array_mask |= bit;
+                            if batch.key.is_compatible_with(&key) {
+                                selected_batch_index = Some(batch_index);
+                                break;
+                            }
+                        }
+                        // check for intersections
+                        if item_rects.iter().any(|r| r.intersects(z_bounding_rect)) {
+                            break;
+                        }
+                        last_array_index = batch.instances.array_index;
+                    }
+                }
+            }
+
+            self.current_batch_index = match selected_batch_index {
+                Some(index) => index,
+                None => {
+                    let instances = storage.next_range(!array_mask, last_array_index);
+                    self.batches.push(PrimitiveBatch::new(key, instances));
+                    self.item_rects.push(Vec::new());
+                    self.batches.len() - 1
+                }
+            };
+            self.item_rects[self.current_batch_index].push(*z_bounding_rect);
+            self.current_z_id = z_id;
+        } else if cfg!(debug_assertions) {
+            // If it's a different segment of the same (larger) primitive, we expect the bounding box
+            // to be the same - coming from the primitive itself, not the segment.
+            assert_eq!(self.item_rects[self.current_batch_index].last(), Some(z_bounding_rect));
+        }
+
+        let batch = &mut self.batches[self.current_batch_index];
+        batch.features |= features;
+
+        &mut storage.arrays[batch.instances.array_index as usize].data
+    }
+}
+
+pub struct OpaqueBatchList {
+    pub pixel_area_threshold_for_new_batch: f32,
+    pub batches: Vec<PrimitiveBatch>,
+    pub current_batch_index: usize,
+    //lookback_count: usize,
+}
+
+impl OpaqueBatchList {
+    fn new(pixel_area_threshold_for_new_batch: f32, _lookback_count: usize) -> Self {
+        OpaqueBatchList {
+            batches: Vec::new(),
+            pixel_area_threshold_for_new_batch,
+            current_batch_index: usize::MAX,
+            //lookback_count,
+        }
+    }
+
+    /// Clear all current batches in this list. This is typically used
+    /// when a primitive is encountered that occludes all previous
+    /// content in this batch list.
+    fn clear(&mut self) {
+        self.current_batch_index = usize::MAX;
+        self.batches.clear();
+    }
+
+    pub fn set_params_and_get_batch<'a>(
+        &mut self,
+        key: BatchKey,
+        features: BatchFeatures,
+        // The bounding box of everything at the current Z, whatever it is. We expect potentially
+        // multiple primitive segments produced by a primitive, which we allow to check
+        // `current_batch_index` instead of iterating the batches.
+        z_bounding_rect: &PictureRect,
+        storage: &'a mut InstanceStorage,
+    ) -> &'a mut Vec<PrimitiveInstanceData> {
+        if self.batches
+            .get(self.current_batch_index)
+            .map_or(true, |b| !b.key.is_compatible_with(&key))
+        {
+            let mut selected_batch_index = None;
+            let mut array_mask = 0;
+            let mut last_array_index = 0;
+            let item_area = z_bounding_rect.size.area();
+
+            // If the area of this primitive is larger than the given threshold,
+            // then it is large enough to warrant breaking a batch for. In this
+            // case we just see if it can be added to the existing batch or
+            // create a new one.
+            if item_area > self.pixel_area_threshold_for_new_batch {
+                if let Some(batch) = self.batches.last() {
+                    if batch.key.is_compatible_with(&key) {
+                        selected_batch_index = Some(self.batches.len() - 1);
+                    } else {
+                        // pick an opposite array
+                        last_array_index = storage.arrays.len() as u8 - 1 - batch.instances.array_index;
+                        array_mask |= 1 << batch.instances.array_index;
+                    }
+                }
+            } else {
+                // Otherwise, look back through a reasonable number of batches.
+                for (batch_index, batch) in self.batches.iter().enumerate().rev() {
+                    // if we are visiting the same instance array again,
+                    // consider that we scanned all of them.
+                    let bit = 1 << batch.instances.array_index;
+                    if array_mask & bit != 0 {
+                        break
+                    }
+                    array_mask |= bit;
+                    if batch.key.is_compatible_with(&key) {
+                        selected_batch_index = Some(batch_index);
+                        break;
+                    }
+                    last_array_index = batch.instances.array_index;
+                }
+            }
+
+            self.current_batch_index = match selected_batch_index {
+                Some(index) => index,
+                None => {
+                    let instances = storage.next_range(!array_mask, last_array_index);
+                    self.batches.push(PrimitiveBatch::new(key, instances));
+                    self.batches.len() - 1
+                }
+            };
+        }
+
+        let batch = &mut self.batches[self.current_batch_index];
+        batch.features |= features;
+        &mut storage.arrays[batch.instances.array_index as usize].data
+    }
+
+    fn finalize(&mut self, storage: &mut InstanceStorage,) {
+        // Reverse the instance arrays in the opaque batches
+        // to get maximum z-buffer efficiency by drawing
+        // front-to-back.
+        // TODO(gw): Maybe we can change the batch code to
+        //           build these in reverse and avoid having
+        //           to reverse the instance array here.
+        for batch in &self.batches {
+            let array = &mut storage.arrays[batch.instances.array_index as usize];
+            let start = array.start_indices[batch.instances.chunk_index as usize];
+            let end = array.start_indices[batch.instances.chunk_index as usize + 1];
+            array.data[start as usize .. end as usize].reverse();
+        }
     }
 }
 
@@ -428,7 +522,7 @@ pub struct AlphaBatchContainer {
 impl AlphaBatchContainer {
     pub fn new(
         task_scissor_rect: Option<DeviceIntRect>,
-    ) -> AlphaBatchContainer {
+    ) -> Self {
         AlphaBatchContainer {
             opaque_batches: Vec::new(),
             alpha_batches: Vec::new(),
@@ -442,11 +536,13 @@ impl AlphaBatchContainer {
         self.alpha_batches.is_empty()
     }
 
+    //TODO: rethink of how merging is done
     fn merge(&mut self, builder: AlphaBatchBuilder, task_rect: &DeviceIntRect) {
         self.task_rect = self.task_rect.union(task_rect);
 
         for other_batch in builder.opaque_batch_list.batches {
-            let batch_index = self.opaque_batches.iter().position(|batch| {
+            self.opaque_batches.push(other_batch);
+            /*let batch_index = self.opaque_batches.iter().position(|batch| {
                 batch.key.is_compatible_with(&other_batch.key)
             });
 
@@ -457,27 +553,30 @@ impl AlphaBatchContainer {
                 None => {
                     self.opaque_batches.push(other_batch);
                 }
-            }
+            }*/
         }
 
-        let mut min_batch_index = 0;
+        //let mut min_batch_index = 0;
 
         for other_batch in builder.alpha_batch_list.batches {
+            self.alpha_batches.push(other_batch);
+            //min_batch_index = self.alpha_batches.len();
+            /*
             let batch_index = self.alpha_batches.iter().skip(min_batch_index).position(|batch| {
                 batch.key.is_compatible_with(&other_batch.key)
             });
 
-            match batch_index {
+            min_batch_index = match batch_index {
                 Some(batch_index) => {
                     let index = batch_index + min_batch_index;
                     self.alpha_batches[index].merge(other_batch);
-                    min_batch_index = index;
+                    index
                 }
                 None => {
                     self.alpha_batches.push(other_batch);
-                    min_batch_index = self.alpha_batches.len();
+                    self.alpha_batches.len()
                 }
-            }
+            };*/
         }
     }
 }
@@ -535,8 +634,9 @@ impl AlphaBatchBuilder {
         merged_batches: &mut AlphaBatchContainer,
         task_rect: DeviceIntRect,
         task_scissor_rect: Option<DeviceIntRect>,
+        insance_storage: &mut InstanceStorage,
     ) {
-        self.opaque_batch_list.finalize();
+        self.opaque_batch_list.finalize(insance_storage);
 
         if task_scissor_rect.is_none() {
             merged_batches.merge(self, &task_rect);
@@ -557,22 +657,24 @@ impl AlphaBatchBuilder {
         bounding_rect: &PictureRect,
         z_id: ZBufferId,
         instance: PrimitiveInstanceData,
+        instance_storage: &mut InstanceStorage,
     ) {
-        self.set_params_and_get_batch(key, features, bounding_rect, z_id)
+        self.set_params_and_get_batch(key, features, bounding_rect, z_id, instance_storage)
             .push(instance);
     }
 
-    pub fn set_params_and_get_batch(
+    pub fn set_params_and_get_batch<'a>(
         &mut self,
         key: BatchKey,
         features: BatchFeatures,
         bounding_rect: &PictureRect,
         z_id: ZBufferId,
-    ) -> &mut Vec<PrimitiveInstanceData> {
+        instance_storage: &'a mut InstanceStorage,
+    ) -> &'a mut Vec<PrimitiveInstanceData> {
         match key.blend_mode {
             BlendMode::None => {
                 self.opaque_batch_list
-                    .set_params_and_get_batch(key, features, bounding_rect)
+                    .set_params_and_get_batch(key, features, bounding_rect, instance_storage)
             }
             BlendMode::Alpha |
             BlendMode::PremultipliedAlpha |
@@ -582,7 +684,7 @@ impl AlphaBatchBuilder {
             BlendMode::SubpixelDualSource |
             BlendMode::Advanced(_) => {
                 self.alpha_batch_list
-                    .set_params_and_get_batch(key, features, bounding_rect, z_id)
+                    .set_params_and_get_batch(key, features, bounding_rect, z_id, instance_storage)
             }
         }
     }
@@ -591,7 +693,8 @@ impl AlphaBatchBuilder {
 /// Supports (recursively) adding a list of primitives and pictures to an alpha batch
 /// builder. In future, it will support multiple dirty regions / slices, allowing the
 /// contents of a picture to be spliced into multiple batch builders.
-pub struct BatchBuilder {
+pub struct BatchBuilder<'a> {
+    instance_storage: &'a mut InstanceStorage,
     /// A temporary buffer that is used during glyph fetching, stored here
     /// to reduce memory allocations.
     glyph_fetch_buffer: Vec<GlyphFetchResult>,
@@ -599,9 +702,13 @@ pub struct BatchBuilder {
     pub batchers: Vec<AlphaBatchBuilder>,
 }
 
-impl BatchBuilder {
-    pub fn new(batchers: Vec<AlphaBatchBuilder>) -> Self {
+impl<'a> BatchBuilder<'a> {
+    pub fn new(
+        instance_storage: &'a mut InstanceStorage,
+        batchers: Vec<AlphaBatchBuilder>,
+    ) -> Self {
         BatchBuilder {
+            instance_storage,
             glyph_fetch_buffer: Vec::new(),
             batchers,
         }
@@ -646,6 +753,7 @@ impl BatchBuilder {
                     bounding_rect,
                     z_id,
                     PrimitiveInstanceData::from(instance),
+                    self.instance_storage,
                 );
             }
         }
@@ -675,6 +783,7 @@ impl BatchBuilder {
                         polygons_address,
                         z: z_id,
                     }),
+                    self.instance_storage,
                 );
             }
         }
@@ -1039,6 +1148,7 @@ impl BatchBuilder {
                     prim_header_index,
                 );
                 let batchers = &mut self.batchers;
+                let instance_storage = &mut self.instance_storage;
 
                 ctx.resource_cache.fetch_glyphs(
                     run.used_font.clone(),
@@ -1116,6 +1226,7 @@ impl BatchBuilder {
                                     BatchFeatures::empty(),
                                     bounding_rect,
                                     z_id,
+                                    instance_storage,
                                 );
 
                                 for glyph in glyphs {

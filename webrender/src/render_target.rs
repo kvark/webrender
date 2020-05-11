@@ -6,7 +6,7 @@
 use api::units::*;
 use api::{ColorF, PremultipliedColorF, ImageFormat, LineOrientation, BorderStyle, PipelineId};
 use crate::batch::{AlphaBatchBuilder, AlphaBatchContainer, BatchTextures, resolve_image};
-use crate::batch::{ClipBatcher, BatchBuilder};
+use crate::batch::{ClipBatcher, BatchBuilder, InstanceStorage};
 use crate::spatial_tree::{SpatialTree, ROOT_SPATIAL_NODE_INDEX};
 use crate::clip::ClipStore;
 use crate::composite::CompositeState;
@@ -103,6 +103,7 @@ pub trait RenderTarget {
         _transforms: &mut TransformPalette,
         _z_generator: &mut ZBufferIdGenerator,
         _composite_state: &mut CompositeState,
+        _instance_storage: &mut InstanceStorage,
     ) {
     }
 
@@ -204,6 +205,7 @@ impl<T: RenderTarget> RenderTargetList<T> {
         transforms: &mut TransformPalette,
         z_generator: &mut ZBufferIdGenerator,
         composite_state: &mut CompositeState,
+        instance_storage: &mut InstanceStorage,
     ) {
         debug_assert_eq!(None, self.saved_index);
         self.saved_index = saved_index;
@@ -218,6 +220,7 @@ impl<T: RenderTarget> RenderTargetList<T> {
                 transforms,
                 z_generator,
                 composite_state,
+                instance_storage,
             );
         }
     }
@@ -337,6 +340,7 @@ impl RenderTarget for ColorRenderTarget {
         transforms: &mut TransformPalette,
         z_generator: &mut ZBufferIdGenerator,
         composite_state: &mut CompositeState,
+        instance_storage: &mut InstanceStorage,
     ) {
         let mut merged_batches = AlphaBatchContainer::new(None);
 
@@ -390,6 +394,7 @@ impl RenderTarget for ColorRenderTarget {
                     );
 
                     let mut batch_builder = BatchBuilder::new(
+                        instance_storage,
                         vec![alpha_batch_builder],
                     );
 
@@ -415,6 +420,7 @@ impl RenderTarget for ColorRenderTarget {
                             &mut merged_batches,
                             target_rect,
                             scissor_rect,
+                            instance_storage,
                         );
                     }
                 }

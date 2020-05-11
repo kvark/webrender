@@ -4,7 +4,7 @@
 
 use api::{ColorF, DebugFlags, DocumentLayer, FontRenderMode, PremultipliedColorF};
 use api::units::*;
-use crate::batch::{BatchBuilder, AlphaBatchBuilder, AlphaBatchContainer};
+use crate::batch::{AlphaBatchBuilder, AlphaBatchContainer, BatchBuilder, InstanceStorage};
 use crate::clip::{ClipStore, ClipChainStack, ClipDataHandle};
 use crate::spatial_tree::{SpatialTree, ROOT_SPATIAL_NODE_INDEX, SpatialNodeIndex, CoordinateSystemId};
 use crate::composite::{CompositorKind, CompositeState};
@@ -600,6 +600,8 @@ impl FrameBuilder {
         let mut deferred_resolves = vec![];
         let mut has_texture_cache_tasks = false;
         let mut prim_headers = PrimitiveHeaders::new();
+        //TODO: use `scene.config.batch_lookback_count` ? 
+        let mut instance_storage = InstanceStorage::new(5);
 
         {
             profile_marker!("Batching");
@@ -643,6 +645,7 @@ impl FrameBuilder {
                     &mut prim_headers,
                     &mut z_generator,
                     &mut composite_state,
+                    &mut instance_storage,
                 );
 
                 match pass.kind {
@@ -676,6 +679,7 @@ impl FrameBuilder {
             passes,
             transform_palette: transform_palette.finish(),
             render_tasks,
+            instance_storage,
             deferred_resolves,
             gpu_cache_frame_id,
             has_been_rendered: false,
@@ -704,6 +708,7 @@ pub fn build_render_pass(
     prim_headers: &mut PrimitiveHeaders,
     z_generator: &mut ZBufferIdGenerator,
     composite_state: &mut CompositeState,
+    instance_storage: &mut InstanceStorage,
 ) {
     profile_scope!("RenderPass::build");
 
@@ -730,6 +735,7 @@ pub fn build_render_pass(
                 transforms,
                 z_generator,
                 composite_state,
+                instance_storage,
             );
         }
         RenderPassKind::OffScreen {
@@ -920,7 +926,7 @@ pub fn build_render_pass(
 
                 // Run the batch creation code for this picture, adding items to
                 // all relevant per-task batchers.
-                let mut batch_builder = BatchBuilder::new(batchers);
+                let mut batch_builder = BatchBuilder::new(instance_storage, batchers);
                 batch_builder.add_pic_to_batch(
                     pic,
                     ctx,
@@ -964,6 +970,7 @@ pub fn build_render_pass(
                                 &mut alpha_batch_container,
                                 target_rect,
                                 None,
+                                instance_storage,
                             );
                             debug_assert!(batch_containers.is_empty());
 
@@ -994,6 +1001,7 @@ pub fn build_render_pass(
                 transforms,
                 z_generator,
                 composite_state,
+                instance_storage,
             );
             alpha.build(
                 ctx,
@@ -1005,6 +1013,7 @@ pub fn build_render_pass(
                 transforms,
                 z_generator,
                 composite_state,
+                instance_storage,
             );
         }
     }
@@ -1027,6 +1036,8 @@ pub struct Frame {
     pub transform_palette: Vec<TransformData>,
     pub render_tasks: RenderTaskGraph,
     pub prim_headers: PrimitiveHeaders,
+
+    pub instance_storage: InstanceStorage,
 
     /// The GPU cache frame that the contents of Self depend on
     pub gpu_cache_frame_id: FrameId,

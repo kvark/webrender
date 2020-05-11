@@ -45,6 +45,7 @@ use api::ExternalImage;
 use api::units::*;
 pub use api::DebugFlags;
 use crate::batch::{AlphaBatchContainer, BatchKind, BatchFeatures, BatchTextures, BrushBatchKind, ClipBatchList};
+use crate::batch::{InstanceRange, InstanceStorage};
 #[cfg(any(feature = "capture", feature = "replay"))]
 use crate::capture::{CaptureConfig, ExternalCaptureImage, PlainExternalImage};
 use crate::composite::{CompositeState, CompositeTileSurface, CompositeTile, ResolvedExternalSurface};
@@ -58,9 +59,7 @@ use crate::device::{ShaderError, TextureFilter, TextureFlags,
              VertexUsageHint, VAO, VBO, CustomVAO};
 use crate::device::ProgramCache;
 use crate::device::query::GpuTimer;
-use euclid::{rect, Transform3D, Scale, default};
 use crate::frame_builder::{Frame, ChasePrimitive, FrameBuilderConfig};
-use gleam::gl;
 use crate::glyph_cache::GlyphCache;
 use crate::glyph_rasterizer::{GlyphFormat, GlyphRasterizer};
 use crate::gpu_cache::{GpuBlockData, GpuCacheUpdate, GpuCacheUpdateList};
@@ -71,14 +70,12 @@ use crate::internal_types::{TextureSource, ResourceCacheError};
 use crate::internal_types::{CacheTextureId, DebugOutput, FastHashMap, FastHashSet, LayerIndex, RenderedDocument, ResultMsg};
 use crate::internal_types::{TextureCacheAllocationKind, TextureCacheUpdate, TextureUpdateList, TextureUpdateSource};
 use crate::internal_types::{RenderTargetInfo, SavedTargetIndex, Swizzle};
-use malloc_size_of::MallocSizeOfOps;
 use crate::picture::{RecordedDirtyRegion, tile_cache_sizes, ResolvedSurfaceTexture};
 use crate::prim_store::DeferredResolve;
 use crate::profiler::{BackendProfileCounters, FrameProfileCounters, TimeProfileCounter,
                GpuProfileTag, RendererProfileCounters, RendererProfileTimers};
 use crate::profiler::{Profiler, ChangeIndicator, ProfileStyle, add_event_marker};
 use crate::device::query::{GpuProfiler, GpuDebugMethod};
-use rayon::{ThreadPool, ThreadPoolBuilder};
 use crate::render_backend::{FrameId, RenderBackend};
 use crate::render_task_graph::RenderTaskGraph;
 use crate::render_task::{RenderTask, RenderTaskData, RenderTaskKind};
@@ -86,7 +83,6 @@ use crate::resource_cache::ResourceCache;
 use crate::scene_builder_thread::{SceneBuilderThread, SceneBuilderThreadChannels, LowPrioritySceneBuilderThread};
 use crate::screen_capture::AsyncScreenshotGrabber;
 use crate::shade::{Shaders, WrShaders};
-use smallvec::SmallVec;
 use crate::texture_cache::TextureCache;
 use crate::render_target::{AlphaRenderTarget, ColorRenderTarget, PictureCacheTarget};
 use crate::render_target::{RenderTarget, TextureCacheRenderTarget, RenderTargetList};
@@ -94,6 +90,12 @@ use crate::render_target::{RenderTargetKind, BlitJob, BlitJobSource};
 use crate::render_task_graph::RenderPassKind;
 use crate::util::drain_filter;
 use crate::c_str;
+
+use euclid::{rect, Transform3D, Scale, default};
+use gleam::gl;
+use malloc_size_of::MallocSizeOfOps;
+use rayon::{ThreadPool, ThreadPoolBuilder};
+use smallvec::SmallVec;
 
 use std;
 use std::cmp;
@@ -1867,6 +1869,7 @@ impl LazyInitializedDebugRenderer {
 // NB: If you add more VAOs here, be sure to deinitialize them in
 // `Renderer::deinit()` below.
 pub struct RendererVAOs {
+    prim_vao_array: Vec<VAO>,
     prim_vao: VAO,
     blur_vao: VAO,
     clip_vao: VAO,
@@ -2615,6 +2618,7 @@ impl Renderer {
             last_time: 0,
             gpu_profile,
             vaos: RendererVAOs {
+                prim_vao_array: Vec::new(),
                 prim_vao,
                 blur_vao,
                 clip_vao,
@@ -2990,7 +2994,10 @@ impl Renderer {
     }
 
     #[cfg(feature = "debugger")]
-    fn debug_color_target(target: &ColorRenderTarget) -> debug_server::Target {
+    fn debug_color_target(
+        target: &ColorRenderTarget,
+        instance_storage: &InstanceStorage,
+    ) -> debug_server::Target {
         let mut debug_target = debug_server::Target::new("RGBA8");
 
         debug_target.add(
@@ -3021,18 +3028,22 @@ impl Renderer {
 
         for alpha_batch_container in &target.alpha_batch_containers {
             for batch in alpha_batch_container.opaque_batches.iter().rev() {
+                let indices = &instance_storage[batch.instances];
                 debug_target.add(
                     debug_server::BatchKind::Opaque,
                     batch.key.kind.debug_name(),
-                    batch.instances.len(),
+                    (indices[1] - indices[0]) as usize,
+                    //batch.instances.len(),
                 );
             }
 
             for batch in &alpha_batch_container.alpha_batches {
+                let indices = &instance_storage[batch.instances];
                 debug_target.add(
                     debug_server::BatchKind::Alpha,
                     batch.key.kind.debug_name(),
-                    batch.instances.len(),
+                    (indices[1] - indices[0]) as usize,
+                    //batch.instances.len(),
                 );
             }
         }
@@ -3058,15 +3069,16 @@ impl Renderer {
         let mut debug_passes = debug_server::PassList::new();
 
         for &(_, ref render_doc) in &self.active_documents {
+            let instance_storage = &render_doc.frame.instance_storage;
             for pass in &render_doc.frame.passes {
                 let mut debug_targets = Vec::new();
                 match pass.kind {
                     RenderPassKind::MainFramebuffer { ref main_target, .. } => {
-                        debug_targets.push(Self::debug_color_target(main_target));
+                        debug_targets.push(Self::debug_color_target(main_target, instance_storage));
                     }
                     RenderPassKind::OffScreen { ref alpha, ref color, ref texture_cache, .. } => {
-                        debug_targets.extend(alpha.targets.iter().map(Self::debug_alpha_target));
-                        debug_targets.extend(color.targets.iter().map(Self::debug_color_target));
+                        debug_targets.extend(alpha.targets.iter().map(|target| Self::debug_alpha_target(target)));
+                        debug_targets.extend(color.targets.iter().map(|target| Self::debug_color_target(target, instance_storage)));
                         debug_targets.extend(texture_cache.iter().map(|(_, target)| Self::debug_texture_cache_target(target)));
                     }
                 }
@@ -3928,13 +3940,7 @@ impl Renderer {
         self.resource_upload_time += upload_time.get();
     }
 
-    pub(crate) fn draw_instanced_batch<T>(
-        &mut self,
-        data: &[T],
-        vertex_array_kind: VertexArrayKind,
-        textures: &BatchTextures,
-        stats: &mut RendererStats,
-    ) {
+    fn bind_textures(&mut self, textures: &BatchTextures) {
         let mut swizzles = [Swizzle::default(); 3];
         for i in 0 .. textures.colors.len() {
             let swizzle = self.texture_resolver.bind(
@@ -3956,36 +3962,51 @@ impl Renderer {
         if let Some(ref texture) = self.dither_matrix_texture {
             self.device.bind_texture(TextureSampler::Dither, texture, Swizzle::default());
         }
-
-        self.draw_instanced_batch_with_previously_bound_textures(data, vertex_array_kind, stats)
     }
 
-    pub(crate) fn draw_instanced_batch_with_previously_bound_textures<T>(
+    /// A version of the instanced batch draw that is specific to `VertexArrayKind::Primitive`.
+    ///
+    ///
+    pub(crate) fn draw_primitives(
+        &mut self,
+        range: InstanceRange,
+        storage: &InstanceStorage,
+        textures: &BatchTextures,
+        stats: &mut RendererStats,
+    ) {
+       self.bind_textures(textures);
+
+       let vao = &self.vaos.prim_vao_array[range.array_index as usize];
+       self.device.bind_vao(vao);
+
+       let inst_indices = &storage[range];
+        //TODO: support DebugFlags::DISABLE_BATCHING
+        self.device
+            .draw_indexed_triangles_instanced_range_u16(6, inst_indices[0] .. inst_indices[1]);
+
+        stats.total_draw_calls += 1;
+        self.profile_counters.draw_calls.inc();
+        self.profile_counters.vertices.add(6 * (inst_indices[1] - inst_indices[0]) as usize);
+    }
+
+    pub(crate) fn draw_instanced_batch<T>(
         &mut self,
         data: &[T],
         vertex_array_kind: VertexArrayKind,
+        textures: &BatchTextures,
         stats: &mut RendererStats,
     ) {
+        self.bind_textures(textures);
+
         // If we end up with an empty draw call here, that means we have
         // probably introduced unnecessary batch breaks during frame
         // building - so we should be catching this earlier and removing
         // the batch.
         debug_assert!(!data.is_empty());
-
         let vao = get_vao(vertex_array_kind, &self.vaos);
-
         self.device.bind_vao(vao);
 
-        let batched = !self.debug_flags.contains(DebugFlags::DISABLE_BATCHING);
-
-        if batched {
-            self.device
-                .update_vao_instances(vao, data, VertexUsageHint::Stream);
-            self.device
-                .draw_indexed_triangles_instanced_u16(6, data.len() as i32);
-            self.profile_counters.draw_calls.inc();
-            stats.total_draw_calls += 1;
-        } else {
+        if self.debug_flags.contains(DebugFlags::DISABLE_BATCHING) {
             for i in 0 .. data.len() {
                 self.device
                     .update_vao_instances(vao, &data[i .. i + 1], VertexUsageHint::Stream);
@@ -3993,6 +4014,13 @@ impl Renderer {
                 self.profile_counters.draw_calls.inc();
                 stats.total_draw_calls += 1;
             }
+        } else {
+            self.device
+                .update_vao_instances(vao, data, VertexUsageHint::Stream);
+            self.device
+                .draw_indexed_triangles_instanced_u16(6, data.len() as i32);
+            self.profile_counters.draw_calls.inc();
+            stats.total_draw_calls += 1;
         }
 
         self.profile_counters.vertices.add(6 * data.len());
@@ -4190,6 +4218,7 @@ impl Renderer {
     fn draw_picture_cache_target(
         &mut self,
         target: &PictureCacheTarget,
+        instance_storage: &InstanceStorage,
         draw_target: DrawTarget,
         content_origin: DeviceIntPoint,
         projection: &default::Transform3D<f32>,
@@ -4229,6 +4258,7 @@ impl Renderer {
 
         self.draw_alpha_batch_container(
             &target.alpha_batch_container,
+            instance_storage,
             draw_target,
             content_origin,
             framebuffer_kind,
@@ -4243,6 +4273,7 @@ impl Renderer {
     fn draw_alpha_batch_container(
         &mut self,
         alpha_batch_container: &AlphaBatchContainer,
+        instance_storage: &InstanceStorage,
         draw_target: DrawTarget,
         content_origin: DeviceIntPoint,
         framebuffer_kind: FramebufferKind,
@@ -4290,11 +4321,18 @@ impl Renderer {
                         );
 
                     let _timer = self.gpu_profile.start_timer(batch.key.kind.sampler_tag());
+                    /*
                     self.draw_instanced_batch(
                         &batch.instances,
                         VertexArrayKind::Primitive,
                         &batch.key.textures,
                         stats
+                    );*/
+                    self.draw_primitives(
+                        batch.instances,
+                        instance_storage,
+                        &batch.key.textures,
+                        stats,
                     );
                 }
 
@@ -4393,7 +4431,8 @@ impl Renderer {
                 if let BatchKind::Brush(BrushBatchKind::MixBlend { task_id, source_id, backdrop_id }) = batch.key.kind {
                     // composites can't be grouped together because
                     // they may overlap and affect each other.
-                    debug_assert_eq!(batch.instances.len(), 1);
+                    //debug_assert_eq!(batch.instances.len(), 1);
+
                     self.handle_readback_composite(
                         draw_target,
                         uses_scissor,
@@ -4410,11 +4449,18 @@ impl Renderer {
                     &mut self.renderer_errors,
                 );
 
+                /*
                 self.draw_instanced_batch(
                     &batch.instances,
                     VertexArrayKind::Primitive,
                     &batch.key.textures,
                     stats
+                );*/
+                self.draw_primitives(
+                    batch.instances,
+                    instance_storage,
+                    &batch.key.textures,
+                    stats,
                 );
 
                 if batch.key.blend_mode == BlendMode::SubpixelWithBgColor {
@@ -4431,8 +4477,14 @@ impl Renderer {
                     // are all set up from the previous draw_instanced_batch call,
                     // so just issue a draw call here to avoid re-uploading the
                     // instances and re-binding textures etc.
-                    self.device
-                        .draw_indexed_triangles_instanced_u16(6, batch.instances.len() as i32);
+                    //self.device
+                    //    .draw_indexed_triangles_instanced_u16(6, batch.instances.len() as i32);
+                    self.draw_primitives(
+                        batch.instances,
+                        instance_storage,
+                        &batch.key.textures,
+                        stats,
+                    );
 
                     self.set_blend_mode_subpixel_with_bg_color_pass2(framebuffer_kind);
                     // re-binding the shader after the blend mode change
@@ -4443,8 +4495,14 @@ impl Renderer {
                     );
                     self.device.switch_mode(ShaderColorMode::SubpixelWithBgColorPass2 as _);
 
-                    self.device
-                        .draw_indexed_triangles_instanced_u16(6, batch.instances.len() as i32);
+                    //self.device
+                    //    .draw_indexed_triangles_instanced_u16(6, batch.instances.len() as i32);
+                    self.draw_primitives(
+                        batch.instances,
+                        instance_storage,
+                        &batch.key.textures,
+                        stats,
+                    );
                 }
 
                 if batch.key.blend_mode == BlendMode::SubpixelWithBgColor {
@@ -4971,6 +5029,7 @@ impl Renderer {
         &mut self,
         draw_target: DrawTarget,
         target: &ColorRenderTarget,
+        instance_storage: &InstanceStorage,
         content_origin: DeviceIntPoint,
         clear_color: Option<[f32; 4]>,
         clear_depth: Option<f32>,
@@ -5100,6 +5159,7 @@ impl Renderer {
         for alpha_batch_container in &target.alpha_batch_containers {
             self.draw_alpha_batch_container(
                 alpha_batch_container,
+                instance_storage,
                 draw_target,
                 content_origin,
                 framebuffer_kind,
@@ -5709,6 +5769,20 @@ impl Renderer {
 
         debug_assert!(self.texture_resolver.prev_pass_alpha.is_none());
         debug_assert!(self.texture_resolver.prev_pass_color.is_none());
+
+        // prepare instance data for the whole frame
+        assert!(self.device.get_capabilities().supports_base_instance);
+        self.device.bind_vao(&self.vaos.prim_vao);
+        while self.vaos.prim_vao_array.len() < frame.instance_storage.arrays.len() {
+            let vao = self.device.create_vao_with_new_instances(&desc::PRIM_INSTANCES, &self.vaos.prim_vao);
+            self.vaos.prim_vao_array.push(vao);
+        }
+        for (vao, array) in self.vaos.prim_vao_array.iter().zip(frame.instance_storage.arrays.iter_mut()) {
+            // add the terminator index
+            array.start_indices.push(array.data.len() as u32);
+            // actually upload the data
+            self.device.update_vao_instances(vao, &array.data, VertexUsageHint::Stream);
+        }
     }
 
     fn update_native_surfaces(&mut self) {
@@ -5867,6 +5941,7 @@ impl Renderer {
                             self.draw_color_target(
                                 draw_target,
                                 main_target,
+                                &frame.instance_storage,
                                 frame.content_origin,
                                 None,
                                 None,
@@ -5957,6 +6032,7 @@ impl Renderer {
 
                             self.draw_picture_cache_target(
                                 picture_target,
+                                &frame.instance_storage,
                                 draw_target,
                                 frame.content_origin,
                                 &projection,
@@ -6031,6 +6107,7 @@ impl Renderer {
                         self.draw_color_target(
                             draw_target,
                             target,
+                            &frame.instance_storage,
                             frame.content_origin,
                             Some([0.0, 0.0, 0.0, 0.0]),
                             clear_depth,
@@ -6580,6 +6657,9 @@ impl Renderer {
         }
         self.device.delete_pbo(self.texture_cache_upload_pbo);
         self.texture_resolver.deinit(&mut self.device);
+        for vao in self.vaos.prim_vao_array {
+            self.device.delete_vao(vao);
+        }
         self.device.delete_vao(self.vaos.prim_vao);
         self.device.delete_vao(self.vaos.resolve_vao);
         self.device.delete_vao(self.vaos.clip_vao);

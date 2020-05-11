@@ -22,7 +22,7 @@ use std::{
     mem,
     num::NonZeroUsize,
     os::raw::c_void,
-    ops::Add,
+    ops::{Add, Range},
     path::PathBuf,
     ptr,
     rc::Rc,
@@ -977,6 +977,8 @@ pub struct Capabilities {
     pub supports_nonzero_pbo_offsets: bool,
     /// Whether the driver supports specifying the texture usage up front.
     pub supports_texture_usage: bool,
+    /// Whether the driver supports draw calls specifying the base instance.
+    pub supports_base_instance: bool,
     /// The name of the renderer, as reported by GL
     pub renderer_name: String,
 }
@@ -1520,6 +1522,11 @@ impl Device {
             gl::GlType::Gles => supports_extension(&extensions,"GL_EXT_blend_func_extended"),
         };
 
+        let supports_base_instance = match gl.get_type() {
+            gl::GlType::Gl => supports_extension(&extensions,"GL_ARB_base_instance"),
+            gl::GlType::Gles => supports_extension(&extensions,"GL_ANGLE_base_vertex_base_instance"),
+        };
+
         // Software webrender relies on the unoptimized shader source.
         let use_optimized_shaders = use_optimized_shaders && !is_software_webrender;
 
@@ -1568,6 +1575,7 @@ impl Device {
                 supports_texture_swizzle,
                 supports_nonzero_pbo_offsets,
                 supports_texture_usage,
+                supports_base_instance,
                 renderer_name,
             },
 
@@ -3356,6 +3364,23 @@ impl Device {
             gl::UNSIGNED_SHORT,
             0,
             instance_count,
+        );
+    }
+
+    pub fn draw_indexed_triangles_instanced_range_u16(&mut self, index_count: i32, instance_range: Range<u32>) {
+        debug_assert!(self.inside_frame);
+        #[cfg(debug_assertions)]
+        debug_assert!(self.shader_is_ready);
+        assert!(self.capabilities.supports_base_instance);
+
+        //Note: it redirects to `draw_elements_instanced_base_vertex_base_instance_angle` on Angle.
+        self.gl.draw_elements_instanced_base_instance(
+            gl::TRIANGLES,
+            index_count,
+            gl::UNSIGNED_SHORT,
+            0,
+            (instance_range.end - instance_range.start) as i32,
+            instance_range.start,
         );
     }
 
