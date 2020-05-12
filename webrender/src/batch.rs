@@ -175,20 +175,21 @@ fn textures_compatible(t1: TextureSource, t2: TextureSource) -> bool {
 
 type InstanceIndex = u32;
 type InstanceArrayIndex = u8;
+type InstanceChunkIndex = u16;
 
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
-pub(crate) struct InstanceRange {
+pub(crate) struct PrimitiveInstanceRange {
     pub array_index: InstanceArrayIndex,
-    pub chunk_index: u16,
+    pub chunk_index: InstanceChunkIndex,
 }
 
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
-pub(crate) struct InstanceArray {
+pub(crate) struct InstanceArray<T> {
     /// Raw array of instance datas.
-    pub data: Vec<PrimitiveInstanceData>,
+    data: Vec<T>,
     /// Start instance index per chunk.
     ///
     /// Chunk `i` occupies instance space in this array
@@ -196,47 +197,140 @@ pub(crate) struct InstanceArray {
     pub start_indices: Vec<InstanceIndex>,
 }
 
+impl<T> InstanceArray<T> {
+    fn new() -> Self {
+        InstanceArray {
+            data: Vec::new(),
+            start_indices: Vec::new(),
+        }
+    }
+
+    fn extend(
+        &mut self,
+        data: impl Iterator<Item = T>,
+    ) -> InstanceChunkIndex {
+        let chunk_index = self.start_indices.len() as InstanceChunkIndex;
+        self.start_indices.push(self.data.len() as InstanceIndex);
+        self.data.extend(data);
+        chunk_index
+    }
+
+    pub fn seal(&mut self) -> &[T] {
+        // add the terminator index
+        self.start_indices.push(self.data.len() as InstanceIndex);
+        &self.data
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "capture", derive(Serialize))]
+#[cfg_attr(feature = "replay", derive(Deserialize))]
+pub(crate) struct ClipInstanceRange {
+    pub chunk_index: InstanceChunkIndex,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[cfg_attr(feature = "capture", derive(Serialize))]
+#[cfg_attr(feature = "replay", derive(Deserialize))]
+enum TextureClipKind {
+    Image,
+    BoxShadow,
+}
+
+#[derive(Debug, Default)]
+#[cfg_attr(feature = "capture", derive(Serialize))]
+#[cfg_attr(feature = "replay", derive(Deserialize))]
+struct InternalClipBatchList {
+    /// Rectangle draws fill up the rectangles with rounded corners.
+    slow_rectangles: Vec<ClipMaskInstance>,
+    fast_rectangles: Vec<ClipMaskInstance>,
+    /// Image draws apply the image masking.
+    textures: FastHashMap<(TextureSource, TextureClipKind), Vec<ClipMaskInstance>>,
+}
+
+/// This structure collects clip batches temporarily,
+/// at the time the render tasks are populated.
+/// It's cleared and re-used for different passes within a frame.
+#[cfg_attr(feature = "capture", derive(Serialize))]
+#[cfg_attr(feature = "replay", derive(Deserialize))]
+pub(crate) struct ClipInstanceCollector {
+    /// The first clip in each clip task. This will overwrite all pixels
+    /// in the clip region, so we can skip doing a clear and write with
+    /// blending disabled, which is a big performance win on Intel GPUs.
+    init_list: Option<InternalClipBatchList>,
+    /// Any subsequent clip masks (rare) for a clip task get drawn in
+    /// a second pass with multiplicative blending enabled.
+    blend_list: InternalClipBatchList,
+}
+
+#[cfg_attr(feature = "capture", derive(Serialize))]
+#[cfg_attr(feature = "replay", derive(Deserialize))]
+pub(crate) struct ClipInstanceStorage {
+    /// Single array of instances that will be uploaded into a VBO.
+    pub(crate) array: InstanceArray<ClipMaskInstance>,
+    /// A pool of clip instance collectors. We retain them for the
+    /// duration of the frame, trying to minimize heap allocations.
+    collectors: Vec<ClipInstanceCollector>,
+}
+
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 pub struct InstanceStorage {
-    pub(crate) arrays: Box<[InstanceArray]>,
+    pub(crate) prims: Box<[InstanceArray<PrimitiveInstanceData>]>,
+    pub(crate) clips: ClipInstanceStorage,
 }
 
 impl InstanceStorage {
     //TODO: I wonder if it can decide to start new arrays automatically?
-    pub(crate) fn new(array_count: usize) -> Self {
+    pub(crate) fn new(prim_arrays: usize) -> Self {
         InstanceStorage {
-            arrays: (0..array_count)
-                .map(|_| InstanceArray {
-                    data: Vec::new(),
-                    start_indices: Vec::new(),
-                })
+            prims: (0..prim_arrays)
+                .map(|_| InstanceArray::new())
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
+            clips: ClipInstanceStorage {
+                array: InstanceArray::new(),
+                collectors: Vec::new(),
+            },
         }
     }
-    /// Start a new instance range in one of the arrays.
-    fn next_range(&mut self, avaliable_mask: u32, default_index: InstanceArrayIndex) -> InstanceRange {
+
+    fn is_last_prim(&self, range: PrimitiveInstanceRange) -> bool {
+        self.prims[range.array_index as usize].start_indices.len() == range.chunk_index as usize + 1
+    }
+
+    /// Start a new primitive instance range in one of the arrays.
+    fn next_prim_range(
+        &mut self,
+        avaliable_mask: u32,
+        default_index: InstanceArrayIndex,
+    ) -> PrimitiveInstanceRange {
         let mut array_index = avaliable_mask.trailing_zeros() as InstanceArrayIndex;
-        if (array_index as usize) >= self.arrays.len() {
+        if (array_index as usize) >= self.prims.len() {
             array_index = default_index;
         }
-        let array = &mut self.arrays[array_index as usize];
-        let chunk_index = array.start_indices.len() as u16;
+        let array = &mut self.prims[array_index as usize];
+        let chunk_index = array.start_indices.len() as InstanceChunkIndex;
         array.start_indices.push(array.data.len() as InstanceIndex);
-        InstanceRange {
+        PrimitiveInstanceRange {
             array_index,
             chunk_index,
         }
     }
 }
 
-impl ops::Index<InstanceRange> for InstanceStorage {
+impl ops::Index<PrimitiveInstanceRange> for InstanceStorage {
     type Output = [InstanceIndex];
-    fn index(&self, range: InstanceRange) -> &[InstanceIndex] {
+    fn index(&self, range: PrimitiveInstanceRange) -> &[InstanceIndex] {
         &self
-            .arrays[range.array_index as usize]
+            .prims[range.array_index as usize]
             .start_indices[range.chunk_index as usize ..]
+    }
+}
+impl ops::Index<ClipInstanceRange> for InstanceStorage {
+    type Output = [InstanceIndex];
+    fn index(&self, range: ClipInstanceRange) -> &[InstanceIndex] {
+        &self.clips.array.start_indices[range.chunk_index as usize ..]
     }
 }
 
@@ -260,14 +354,15 @@ bitflags! {
 
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
+#[derive(Debug)]
 pub struct PrimitiveBatch {
     pub key: BatchKey,
-    pub(crate) instances: InstanceRange,
+    pub(crate) instances: PrimitiveInstanceRange,
     pub features: BatchFeatures,
 }
 
 impl PrimitiveBatch {
-    fn new(key: BatchKey, instances: InstanceRange) -> Self {
+    fn new(key: BatchKey, instances: PrimitiveInstanceRange) -> Self {
         PrimitiveBatch {
             key,
             instances,
@@ -320,18 +415,22 @@ impl AlphaBatchList {
         z_id: ZBufferId,
         storage: &'a mut InstanceStorage,
     ) -> &'a mut Vec<PrimitiveInstanceData> {
+        debug!("Adding alpha key {:?}", key);
         if z_id != self.current_z_id ||
             self.batches
             .get(self.current_batch_index)
-            .map_or(true, |b| !b.key.is_compatible_with(&key))
+            .map_or(true, |b| !b.key.is_compatible_with(&key) || !storage.is_last_prim(b.instances))
         {
             let mut selected_batch_index = None;
             let mut last_array_index = 0;
-            let mut array_mask = 0;
+            let mut array_mask = self.batches
+                .get(self.current_batch_index)
+                .map_or(0, |b| 1 << b.instances.array_index);
 
             match key.blend_mode {
                 BlendMode::SubpixelWithBgColor => {
                     for (batch_index, (batch, item_rects)) in self.batches.iter().zip(self.item_rects.iter()).enumerate().rev().take(self.lookback_count) {
+                        trace!("\tConsidering {:?}", batch);
                         // Some subpixel batches are drawn in two passes. Because of this, we need
                         // to check for overlaps with every batch (which is a bit different
                         // than the normal batching below).
@@ -341,7 +440,7 @@ impl AlphaBatchList {
                         let bit = 1 << batch.instances.array_index;
                         if array_mask & bit == 0 {
                             array_mask |= bit;
-                            if batch.key.is_compatible_with(&key) {
+                            if batch.key.is_compatible_with(&key) && storage.is_last_prim(batch.instances) {
                                 selected_batch_index = Some(batch_index);
                                 break;
                             }
@@ -354,6 +453,7 @@ impl AlphaBatchList {
                 }
                 _ => {
                     for (batch_index, (batch, item_rects)) in self.batches.iter().zip(self.item_rects.iter()).enumerate().rev().take(self.lookback_count) {
+                        trace!("\tConsidering {:?}", batch);
                         // For normal batches, we only need to check for overlaps for batches
                         // other than the first batch we consider. If the first batch
                         // is compatible, then we know there isn't any potential overlap
@@ -361,7 +461,7 @@ impl AlphaBatchList {
                         let bit = 1 << batch.instances.array_index;
                         if array_mask & bit == 0 {
                             array_mask |= bit;
-                            if batch.key.is_compatible_with(&key) {
+                            if batch.key.is_compatible_with(&key) && storage.is_last_prim(batch.instances) {
                                 selected_batch_index = Some(batch_index);
                                 break;
                             }
@@ -378,7 +478,8 @@ impl AlphaBatchList {
             self.current_batch_index = match selected_batch_index {
                 Some(index) => index,
                 None => {
-                    let instances = storage.next_range(!array_mask, last_array_index);
+                    let instances = storage.next_prim_range(!array_mask, last_array_index);
+                    trace!("\tCreating {:?}", instances);
                     self.batches.push(PrimitiveBatch::new(key, instances));
                     self.item_rects.push(Vec::new());
                     self.batches.len() - 1
@@ -395,7 +496,10 @@ impl AlphaBatchList {
         let batch = &mut self.batches[self.current_batch_index];
         batch.features |= features;
 
-        &mut storage.arrays[batch.instances.array_index as usize].data
+        let array = &mut storage.prims[batch.instances.array_index as usize];
+        debug_assert_eq!(batch.instances.chunk_index as usize + 1, array.start_indices.len(),
+            "Fail at {:?}, current array indices {:?}", batch.instances, array.start_indices);
+        &mut array.data
     }
 }
 
@@ -434,12 +538,15 @@ impl OpaqueBatchList {
         z_bounding_rect: &PictureRect,
         storage: &'a mut InstanceStorage,
     ) -> &'a mut Vec<PrimitiveInstanceData> {
+        debug!("Adding opaque key {:?}", key);
         if self.batches
             .get(self.current_batch_index)
-            .map_or(true, |b| !b.key.is_compatible_with(&key))
+            .map_or(true, |b| !b.key.is_compatible_with(&key) || !storage.is_last_prim(b.instances))
         {
             let mut selected_batch_index = None;
-            let mut array_mask = 0;
+            let mut array_mask = self.batches
+                .get(self.current_batch_index)
+                .map_or(0, |b| 1 << b.instances.array_index);
             let mut last_array_index = 0;
             let item_area = z_bounding_rect.size.area();
 
@@ -449,17 +556,18 @@ impl OpaqueBatchList {
             // create a new one.
             if item_area > self.pixel_area_threshold_for_new_batch {
                 if let Some(batch) = self.batches.last() {
-                    if batch.key.is_compatible_with(&key) {
+                    if batch.key.is_compatible_with(&key) && storage.is_last_prim(batch.instances) {
                         selected_batch_index = Some(self.batches.len() - 1);
                     } else {
                         // pick an opposite array
-                        last_array_index = storage.arrays.len() as u8 - 1 - batch.instances.array_index;
+                        last_array_index = storage.prims.len() as u8 - 1 - batch.instances.array_index;
                         array_mask |= 1 << batch.instances.array_index;
                     }
                 }
             } else {
                 // Otherwise, look back through a reasonable number of batches.
                 for (batch_index, batch) in self.batches.iter().enumerate().rev() {
+                    trace!("\tConsidering {:?}", batch);
                     // if we are visiting the same instance array again,
                     // consider that we scanned all of them.
                     let bit = 1 << batch.instances.array_index;
@@ -467,7 +575,7 @@ impl OpaqueBatchList {
                         break
                     }
                     array_mask |= bit;
-                    if batch.key.is_compatible_with(&key) {
+                    if batch.key.is_compatible_with(&key) && storage.is_last_prim(batch.instances) {
                         selected_batch_index = Some(batch_index);
                         break;
                     }
@@ -478,7 +586,8 @@ impl OpaqueBatchList {
             self.current_batch_index = match selected_batch_index {
                 Some(index) => index,
                 None => {
-                    let instances = storage.next_range(!array_mask, last_array_index);
+                    let instances = storage.next_prim_range(!array_mask, last_array_index);
+                    trace!("\tCreating {:?}", instances);
                     self.batches.push(PrimitiveBatch::new(key, instances));
                     self.batches.len() - 1
                 }
@@ -487,10 +596,14 @@ impl OpaqueBatchList {
 
         let batch = &mut self.batches[self.current_batch_index];
         batch.features |= features;
-        &mut storage.arrays[batch.instances.array_index as usize].data
+
+        let array = &mut storage.prims[batch.instances.array_index as usize];
+        debug_assert_eq!(batch.instances.chunk_index as usize + 1, array.start_indices.len(),
+            "Fail at {:?}, current array indices {:?}", batch.instances, array.start_indices);
+        &mut array.data
     }
 
-    fn finalize(&mut self, storage: &mut InstanceStorage,) {
+    fn finalize(&mut self, storage: &mut InstanceStorage) {
         // Reverse the instance arrays in the opaque batches
         // to get maximum z-buffer efficiency by drawing
         // front-to-back.
@@ -498,9 +611,12 @@ impl OpaqueBatchList {
         //           build these in reverse and avoid having
         //           to reverse the instance array here.
         for batch in &self.batches {
-            let array = &mut storage.arrays[batch.instances.array_index as usize];
+            let array = &mut storage.prims[batch.instances.array_index as usize];
             let start = array.start_indices[batch.instances.chunk_index as usize];
-            let end = array.start_indices[batch.instances.chunk_index as usize + 1];
+            // we haven't sealed the instance storage yet, so the `chunk_index+1` may be missing.
+            let end = *array.start_indices
+                .get(batch.instances.chunk_index as usize + 1)
+                .unwrap_or(&(array.data.len() as InstanceIndex));
             array.data[start as usize .. end as usize].reverse();
         }
     }
@@ -634,9 +750,9 @@ impl AlphaBatchBuilder {
         merged_batches: &mut AlphaBatchContainer,
         task_rect: DeviceIntRect,
         task_scissor_rect: Option<DeviceIntRect>,
-        insance_storage: &mut InstanceStorage,
+        instance_storage: &mut InstanceStorage,
     ) {
-        self.opaque_batch_list.finalize(insance_storage);
+        self.opaque_batch_list.finalize(instance_storage);
 
         if task_scissor_rect.is_none() {
             merged_batches.merge(self, &task_rect);
@@ -3120,54 +3236,116 @@ pub fn resolve_image(
     }
 }
 
-/// A list of clip instances to be drawn into a target.
 #[derive(Debug)]
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
-pub struct ClipBatchList {
-    /// Rectangle draws fill up the rectangles with rounded corners.
-    pub slow_rectangles: Vec<ClipMaskInstance>,
-    pub fast_rectangles: Vec<ClipMaskInstance>,
-    /// Image draws apply the image masking.
-    pub images: FastHashMap<TextureSource, Vec<ClipMaskInstance>>,
-    pub box_shadows: FastHashMap<TextureSource, Vec<ClipMaskInstance>>,
+pub enum ClipBatchKind {
+    SlowRectangle,
+    FastRectangle,
+    Image(TextureSource),
+    BoxShadow(TextureSource),
 }
 
-impl ClipBatchList {
-    fn new() -> Self {
-        ClipBatchList {
-            slow_rectangles: Vec::new(),
-            fast_rectangles: Vec::new(),
-            images: FastHashMap::default(),
-            box_shadows: FastHashMap::default(),
+#[derive(Debug)]
+#[cfg_attr(feature = "capture", derive(Serialize))]
+#[cfg_attr(feature = "replay", derive(Deserialize))]
+pub struct ClipBatch {
+    pub kind: ClipBatchKind,
+    pub blend: bool,
+    pub(crate) range: ClipInstanceRange,
+}
+
+impl ClipInstanceStorage {
+    pub(crate) fn create_collector(
+        &mut self,
+        gpu_supports_fast_clears: bool,
+    ) -> ClipInstanceCollector {
+        self.collectors
+            .pop()
+            .unwrap_or_else(|| ClipInstanceCollector {
+                init_list: if gpu_supports_fast_clears {
+                    None
+                } else {
+                    Some(InternalClipBatchList::default())
+                },
+                blend_list: InternalClipBatchList::default(),
+            })
+    }
+    pub(crate) fn return_collector(
+        &mut self,
+        mut collector: ClipInstanceCollector,
+    ) -> Vec<ClipBatch> {
+        let total = collector.blend_list.count() +
+            collector.init_list.as_ref().map_or(0, |list| list.count());
+        let mut batches = Vec::with_capacity(total);
+        if let Some(ref mut list) = collector.init_list {
+            list.flush_to(&mut batches, false, &mut self.array);
+        }
+        collector.blend_list.flush_to(&mut batches, true, &mut self.array);
+        debug_assert_eq!(batches.len(), total);
+        self.collectors.push(collector);
+        batches
+    }
+}
+
+impl InternalClipBatchList {
+    fn count(&self) -> usize {
+        self.textures.values().filter(|list| !list.is_empty()).count() +
+            if self.slow_rectangles.is_empty() { 0 } else { 1 } +
+            if self.fast_rectangles.is_empty() { 0 } else { 1 }
+    }
+
+    fn flush_to(
+        &mut self,
+        dest: &mut Vec<ClipBatch>,
+        blend: bool,
+        array: &mut InstanceArray<ClipMaskInstance>,
+    ) {
+        if !self.slow_rectangles.is_empty() {
+            dest.push(ClipBatch{
+                kind: ClipBatchKind::SlowRectangle,
+                blend,
+                range: ClipInstanceRange {
+                    chunk_index: array.extend(self.slow_rectangles.drain(..)),
+                },
+            });
+        }
+        if !self.fast_rectangles.is_empty() {
+            dest.push(ClipBatch{
+                kind: ClipBatchKind::FastRectangle,
+                blend,
+                range: ClipInstanceRange {
+                    chunk_index: array.extend(self.fast_rectangles.drain(..)),
+                },
+            });
+        }
+        for (&(source, sub_kind), list) in self.textures.iter_mut() {
+            if !list.is_empty() {
+                dest.push(ClipBatch {
+                    kind: match sub_kind {
+                        TextureClipKind::Image => ClipBatchKind::Image(source),
+                        TextureClipKind::BoxShadow => ClipBatchKind::BoxShadow(source),
+                    },
+                    blend,
+                    range: ClipInstanceRange {
+                        chunk_index: array.extend(list.drain(..)),
+                    },
+                });
+            }
         }
     }
 }
 
-/// Batcher managing draw calls into the clip mask (in the RT cache).
-#[derive(Debug)]
-#[cfg_attr(feature = "capture", derive(Serialize))]
-#[cfg_attr(feature = "replay", derive(Deserialize))]
-pub struct ClipBatcher {
-    /// The first clip in each clip task. This will overwrite all pixels
-    /// in the clip region, so we can skip doing a clear and write with
-    /// blending disabled, which is a big performance win on Intel GPUs.
-    pub primary_clips: ClipBatchList,
-    /// Any subsequent clip masks (rare) for a clip task get drawn in
-    /// a second pass with multiplicative blending enabled.
-    pub secondary_clips: ClipBatchList,
-
-    gpu_supports_fast_clears: bool,
-}
-
-impl ClipBatcher {
-    pub fn new(
-        gpu_supports_fast_clears: bool,
-    ) -> Self {
-        ClipBatcher {
-            primary_clips: ClipBatchList::new(),
-            secondary_clips: ClipBatchList::new(),
-            gpu_supports_fast_clears,
+impl ClipInstanceCollector {
+    /// Retrieve the correct clip batch list to append to, depending
+    /// on whether this is the first clip mask for a clip task.
+    fn get_batch_list(
+        &mut self,
+        is_first_clip: bool,
+    ) -> &mut InternalClipBatchList {
+        match self.init_list {
+            Some(ref mut list) if is_first_clip => list,
+            _ => &mut self.blend_list,
         }
     }
 
@@ -3193,7 +3371,9 @@ impl ClipBatcher {
             device_pixel_scale,
         };
 
-        self.primary_clips.slow_rectangles.push(instance);
+        self.get_batch_list(true)
+            .slow_rectangles
+            .push(instance);
     }
 
     /// Where appropriate, draw a clip rectangle as a small series of tiles,
@@ -3287,19 +3467,6 @@ impl ClipBatcher {
         true
     }
 
-    /// Retrieve the correct clip batch list to append to, depending
-    /// on whether this is the first clip mask for a clip task.
-    fn get_batch_list(
-        &mut self,
-        is_first_clip: bool,
-    ) -> &mut ClipBatchList {
-        if is_first_clip && !self.gpu_supports_fast_clears {
-            &mut self.primary_clips
-        } else {
-            &mut self.secondary_clips
-        }
-    }
-
     pub fn add(
         &mut self,
         clip_node_range: ClipNodeRange,
@@ -3372,8 +3539,8 @@ impl ClipBatcher {
                         };
 
                         self.get_batch_list(is_first_clip)
-                            .images
-                            .entry(cache_item.texture_id)
+                            .textures
+                            .entry((cache_item.texture_id, TextureClipKind::Image))
                             .or_insert_with(Vec::new)
                             .push(ClipMaskInstance {
                                 clip_data_address,
@@ -3414,8 +3581,8 @@ impl ClipBatcher {
                     debug_assert_ne!(cache_item.texture_id, TextureSource::Invalid);
 
                     self.get_batch_list(is_first_clip)
-                        .box_shadows
-                        .entry(cache_item.texture_id)
+                        .textures
+                        .entry((cache_item.texture_id, TextureClipKind::BoxShadow))
                         .or_insert_with(Vec::new)
                         .push(ClipMaskInstance {
                             clip_data_address: gpu_address,

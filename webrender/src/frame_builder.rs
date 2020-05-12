@@ -28,8 +28,9 @@ use crate::render_task::{RenderTask, RenderTaskLocation, RenderTaskKind};
 use crate::resource_cache::{ResourceCache};
 use crate::scene::{BuiltScene, SceneProperties};
 use crate::segment::SegmentBuilder;
-use std::{f32, mem};
 use crate::util::MaxRect;
+
+use std::{f32, mem};
 
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -600,8 +601,10 @@ impl FrameBuilder {
         let mut deferred_resolves = vec![];
         let mut has_texture_cache_tasks = false;
         let mut prim_headers = PrimitiveHeaders::new();
-        //TODO: use `scene.config.batch_lookback_count` ? 
-        let mut instance_storage = InstanceStorage::new(5);
+        //TODO: use `scene.config.batch_lookback_count`?
+        let mut instance_storage = InstanceStorage::new(
+            5,
+        );
 
         {
             profile_marker!("Batching");
@@ -626,6 +629,7 @@ impl FrameBuilder {
                     use_advanced_blending: scene.config.gpu_supports_advanced_blend,
                     break_advanced_blend_batches: !scene.config.advanced_blend_is_coherent,
                     batch_lookback_count: scene.config.batch_lookback_count,
+                    gpu_supports_fast_clears: scene.config.gpu_supports_fast_clears,
                     spatial_tree: &scene.spatial_tree,
                     data_stores,
                     surfaces: &surfaces,
@@ -826,8 +830,8 @@ pub fn build_render_pass(
                     (target_kind, texture_target, layer)
                 };
 
-                match texture_target {
-                    Some(texture_target) => {
+                match (texture_target, target_kind) {
+                    (Some(texture_target), _) => {
                         let texture = texture_cache
                             .entry((texture_target, layer))
                             .or_insert_with(||
@@ -835,31 +839,31 @@ pub fn build_render_pass(
                             );
                         texture.add_task(task_id, render_tasks);
                     }
-                    None => {
-                        match target_kind {
-                            RenderTargetKind::Color => {
-                                color.targets[layer].add_task(
-                                    task_id,
-                                    ctx,
-                                    gpu_cache,
-                                    render_tasks,
-                                    clip_store,
-                                    transforms,
-                                    deferred_resolves,
-                                )
-                            }
-                            RenderTargetKind::Alpha => {
-                                alpha.targets[layer].add_task(
-                                    task_id,
-                                    ctx,
-                                    gpu_cache,
-                                    render_tasks,
-                                    clip_store,
-                                    transforms,
-                                    deferred_resolves,
-                                )
-                            }
+                    (None, RenderTargetKind::Color) => {
+                        color.targets[layer].add_task(
+                            task_id,
+                            ctx,
+                            gpu_cache,
+                            render_tasks,
+                            clip_store,
+                            transforms,
+                            deferred_resolves,
+                        )
+                    }
+                    (None, RenderTargetKind::Alpha) => {
+                        if alpha.targets[layer].clip_instance_collector.is_none() {
+                            let collector = instance_storage.clips.create_collector(ctx.gpu_supports_fast_clears);
+                            alpha.targets[layer].clip_instance_collector = Some(collector);
                         }
+                        alpha.targets[layer].add_task(
+                            task_id,
+                            ctx,
+                            gpu_cache,
+                            render_tasks,
+                            clip_store,
+                            transforms,
+                            deferred_resolves,
+                        )
                     }
                 }
             }

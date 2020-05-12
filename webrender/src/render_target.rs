@@ -6,7 +6,7 @@
 use api::units::*;
 use api::{ColorF, PremultipliedColorF, ImageFormat, LineOrientation, BorderStyle, PipelineId};
 use crate::batch::{AlphaBatchBuilder, AlphaBatchContainer, BatchTextures, resolve_image};
-use crate::batch::{ClipBatcher, BatchBuilder, InstanceStorage};
+use crate::batch::{BatchBuilder, ClipBatch, ClipInstanceCollector, InstanceStorage};
 use crate::spatial_tree::{SpatialTree, ROOT_SPATIAL_NODE_INDEX};
 use crate::clip::ClipStore;
 use crate::composite::CompositeState;
@@ -63,6 +63,7 @@ pub struct RenderTargetContext<'a, 'rc> {
     pub use_advanced_blending: bool,
     pub break_advanced_blend_batches: bool,
     pub batch_lookback_count: usize,
+    pub gpu_supports_fast_clears: bool,
     pub spatial_tree: &'a SpatialTree,
     pub data_stores: &'a DataStores,
     pub surfaces: &'a [SurfaceInfo],
@@ -95,17 +96,16 @@ pub trait RenderTarget {
     /// end of the build phase.
     fn build(
         &mut self,
-        _ctx: &mut RenderTargetContext,
-        _gpu_cache: &mut GpuCache,
-        _render_tasks: &mut RenderTaskGraph,
-        _deferred_resolves: &mut Vec<DeferredResolve>,
-        _prim_headers: &mut PrimitiveHeaders,
-        _transforms: &mut TransformPalette,
-        _z_generator: &mut ZBufferIdGenerator,
-        _composite_state: &mut CompositeState,
-        _instance_storage: &mut InstanceStorage,
-    ) {
-    }
+        ctx: &mut RenderTargetContext,
+        gpu_cache: &mut GpuCache,
+        render_tasks: &mut RenderTaskGraph,
+        deferred_resolves: &mut Vec<DeferredResolve>,
+        prim_headers: &mut PrimitiveHeaders,
+        transforms: &mut TransformPalette,
+        z_generator: &mut ZBufferIdGenerator,
+        composite_state: &mut CompositeState,
+        instance_storage: &mut InstanceStorage,
+    );
 
     /// Associates a `RenderTask` with this target. That task must be assigned
     /// to a region returned by invoking `allocate()` on this target.
@@ -581,7 +581,8 @@ impl RenderTarget for ColorRenderTarget {
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 pub struct AlphaRenderTarget {
-    pub clip_batcher: ClipBatcher,
+    pub clips: Vec<ClipBatch>,
+    pub(crate) clip_instance_collector: Option<ClipInstanceCollector>,
     // List of blur operations to apply for this render target.
     pub vertical_blurs: Vec<BlurInstance>,
     pub horizontal_blurs: Vec<BlurInstance>,
@@ -597,10 +598,11 @@ pub struct AlphaRenderTarget {
 impl RenderTarget for AlphaRenderTarget {
     fn new(
         _: DeviceIntSize,
-        gpu_supports_fast_clears: bool,
+        __: bool,
     ) -> Self {
         AlphaRenderTarget {
-            clip_batcher: ClipBatcher::new(gpu_supports_fast_clears),
+            clips: Vec::new(),
+            clip_instance_collector: None,
             vertical_blurs: Vec::new(),
             horizontal_blurs: Vec::new(),
             scalings: FastHashMap::default(),
@@ -608,6 +610,22 @@ impl RenderTarget for AlphaRenderTarget {
             one_clears: Vec::new(),
             used_rect: DeviceIntRect::zero(),
         }
+    }
+
+    fn build(
+        &mut self,
+        _ctx: &mut RenderTargetContext,
+        _gpu_cache: &mut GpuCache,
+        _render_tasks: &mut RenderTaskGraph,
+        _deferred_resolves: &mut Vec<DeferredResolve>,
+        _prim_headers: &mut PrimitiveHeaders,
+        _transforms: &mut TransformPalette,
+        _z_generator: &mut ZBufferIdGenerator,
+        _composite_state: &mut CompositeState,
+        instance_storage: &mut InstanceStorage,
+    ) {
+        let collector = self.clip_instance_collector.take().unwrap();
+        self.clips = instance_storage.clips.return_collector(collector);
     }
 
     fn add_task(
@@ -663,7 +681,7 @@ impl RenderTarget for AlphaRenderTarget {
                 );
             }
             RenderTaskKind::CacheMask(ref task_info) => {
-                self.clip_batcher.add(
+                self.clip_instance_collector.as_mut().unwrap().add(
                     task_info.clip_node_range,
                     task_info.root_spatial_node_index,
                     ctx.resource_cache,
@@ -684,7 +702,7 @@ impl RenderTarget for AlphaRenderTarget {
                     DevicePoint::zero(),
                     target_rect.size.to_f32(),
                 );
-                self.clip_batcher.add_clip_region(
+                self.clip_instance_collector.as_mut().unwrap().add_clip_region(
                     region_task.clip_data_address,
                     region_task.local_pos,
                     device_rect,

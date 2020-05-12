@@ -44,8 +44,8 @@ use api::{RenderApiSender, RenderNotifier, TextureTarget};
 use api::ExternalImage;
 use api::units::*;
 pub use api::DebugFlags;
-use crate::batch::{AlphaBatchContainer, BatchKind, BatchFeatures, BatchTextures, BrushBatchKind, ClipBatchList};
-use crate::batch::{InstanceRange, InstanceStorage};
+use crate::batch::{AlphaBatchContainer, BatchKind, BatchFeatures, BatchTextures, BrushBatchKind, ClipBatch};
+use crate::batch::{ClipBatchKind, ClipInstanceRange, InstanceStorage, PrimitiveInstanceRange};
 #[cfg(any(feature = "capture", feature = "replay"))]
 use crate::capture::{CaptureConfig, ExternalCaptureImage, PlainExternalImage};
 use crate::composite::{CompositeState, CompositeTileSurface, CompositeTile, ResolvedExternalSurface};
@@ -2925,7 +2925,10 @@ impl Renderer {
     }
 
     #[cfg(feature = "debugger")]
-    fn debug_alpha_target(target: &AlphaRenderTarget) -> debug_server::Target {
+    fn debug_alpha_target(
+        target: &AlphaRenderTarget,
+        instance_storage: &InstanceStorage,
+    ) -> debug_server::Target {
         let mut debug_target = debug_server::Target::new("A8");
 
         debug_target.add(
@@ -2944,16 +2947,6 @@ impl Renderer {
             target.one_clears.len(),
         );
         debug_target.add(
-            debug_server::BatchKind::Clip,
-            "BoxShadows [p]",
-            target.clip_batcher.primary_clips.box_shadows.len(),
-        );
-        debug_target.add(
-            debug_server::BatchKind::Clip,
-            "BoxShadows [s]",
-            target.clip_batcher.secondary_clips.box_shadows.len(),
-        );
-        debug_target.add(
             debug_server::BatchKind::Cache,
             "Vertical Blur",
             target.vertical_blurs.len(),
@@ -2963,31 +2956,19 @@ impl Renderer {
             "Horizontal Blur",
             target.horizontal_blurs.len(),
         );
-        debug_target.add(
-            debug_server::BatchKind::Clip,
-            "Slow Rectangles [p]",
-            target.clip_batcher.primary_clips.slow_rectangles.len(),
-        );
-        debug_target.add(
-            debug_server::BatchKind::Clip,
-            "Fast Rectangles [p]",
-            target.clip_batcher.primary_clips.fast_rectangles.len(),
-        );
-        debug_target.add(
-            debug_server::BatchKind::Clip,
-            "Slow Rectangles [s]",
-            target.clip_batcher.secondary_clips.slow_rectangles.len(),
-        );
-        debug_target.add(
-            debug_server::BatchKind::Clip,
-            "Fast Rectangles [s]",
-            target.clip_batcher.secondary_clips.fast_rectangles.len(),
-        );
-        for (_, items) in target.clip_batcher.primary_clips.images.iter() {
-            debug_target.add(debug_server::BatchKind::Clip, "Image mask [p]", items.len());
-        }
-        for (_, items) in target.clip_batcher.secondary_clips.images.iter() {
-            debug_target.add(debug_server::BatchKind::Clip, "Image mask [s]", items.len());
+        for batch in &target.clips {
+            let indices = &instance_storage[batch.range];
+            let marker = match batch.kind {
+                ClipBatchKind::FastRectangle => "Clip Fast Rect",
+                ClipBatchKind::SlowRectangle => "Clip Slow Rect",
+                ClipBatchKind::Image(_) => "Clip Image",
+                ClipBatchKind::BoxShadow(_) => "Clip Box Shadow",
+            };
+            debug_target.add(
+                debug_server::BatchKind::Clip,
+                marker,
+                (indices[1] - indices[0]) as usize,
+            );
         }
 
         debug_target
@@ -3077,7 +3058,7 @@ impl Renderer {
                         debug_targets.push(Self::debug_color_target(main_target, instance_storage));
                     }
                     RenderPassKind::OffScreen { ref alpha, ref color, ref texture_cache, .. } => {
-                        debug_targets.extend(alpha.targets.iter().map(|target| Self::debug_alpha_target(target)));
+                        debug_targets.extend(alpha.targets.iter().map(|target| Self::debug_alpha_target(target, instance_storage)));
                         debug_targets.extend(color.targets.iter().map(|target| Self::debug_color_target(target, instance_storage)));
                         debug_targets.extend(texture_cache.iter().map(|(_, target)| Self::debug_texture_cache_target(target)));
                     }
@@ -3965,11 +3946,9 @@ impl Renderer {
     }
 
     /// A version of the instanced batch draw that is specific to `VertexArrayKind::Primitive`.
-    ///
-    ///
     pub(crate) fn draw_primitives(
         &mut self,
-        range: InstanceRange,
+        range: PrimitiveInstanceRange,
         storage: &InstanceStorage,
         textures: &BatchTextures,
         stats: &mut RendererStats,
@@ -3978,6 +3957,27 @@ impl Renderer {
 
        let vao = &self.vaos.prim_vao_array[range.array_index as usize];
        self.device.bind_vao(vao);
+
+       let inst_indices = &storage[range];
+        //TODO: support DebugFlags::DISABLE_BATCHING
+        self.device
+            .draw_indexed_triangles_instanced_range_u16(6, inst_indices[0] .. inst_indices[1]);
+
+        stats.total_draw_calls += 1;
+        self.profile_counters.draw_calls.inc();
+        self.profile_counters.vertices.add(6 * (inst_indices[1] - inst_indices[0]) as usize);
+    }
+
+    /// A version of the instanced batch draw that is specific to `VertexArrayKind::Clip`.
+    ///
+    /// Note: we aren't binding the textures here.
+    pub(crate) fn draw_clips(
+        &mut self,
+        range: ClipInstanceRange,
+        storage: &InstanceStorage,
+        stats: &mut RendererStats,
+    ) {
+       self.device.bind_vao(&self.vaos.clip_vao);
 
        let inst_indices = &storage[range];
         //TODO: support DebugFlags::DISABLE_BATCHING
@@ -5216,7 +5216,8 @@ impl Renderer {
     /// Draw all the instances in a clip batcher list to the current target.
     fn draw_clip_batch_list(
         &mut self,
-        list: &ClipBatchList,
+        list: &[ClipBatch],
+        instance_storage: &InstanceStorage,
         projection: &default::Transform3D<f32>,
         stats: &mut RendererStats,
     ) {
@@ -5224,71 +5225,59 @@ impl Renderer {
             return;
         }
 
-        // draw rounded cornered rectangles
-        if !list.slow_rectangles.is_empty() {
-            let _gm2 = self.gpu_profile.start_marker("slow clip rectangles");
-            self.shaders.borrow_mut().cs_clip_rectangle_slow.bind(
-                &mut self.device,
-                projection,
-                &mut self.renderer_errors,
-            );
-            self.draw_instanced_batch(
-                &list.slow_rectangles,
-                VertexArrayKind::Clip,
-                &BatchTextures::no_texture(),
-                stats,
-            );
-        }
-        if !list.fast_rectangles.is_empty() {
-            let _gm2 = self.gpu_profile.start_marker("fast clip rectangles");
-            self.shaders.borrow_mut().cs_clip_rectangle_fast.bind(
-                &mut self.device,
-                projection,
-                &mut self.renderer_errors,
-            );
-            self.draw_instanced_batch(
-                &list.fast_rectangles,
-                VertexArrayKind::Clip,
-                &BatchTextures::no_texture(),
-                stats,
-            );
-        }
-        // draw box-shadow clips
-        for (mask_texture_id, items) in list.box_shadows.iter() {
-            let _gm2 = self.gpu_profile.start_marker("box-shadows");
-            let textures = BatchTextures {
-                colors: [
-                    *mask_texture_id,
-                    TextureSource::Invalid,
-                    TextureSource::Invalid,
-                ],
-            };
-            self.shaders.borrow_mut().cs_clip_box_shadow
-                .bind(&mut self.device, projection, &mut self.renderer_errors);
-            self.draw_instanced_batch(
-                items,
-                VertexArrayKind::Clip,
-                &textures,
-                stats,
-            );
-        }
+        for batch in list {
+            if batch.blend {
+                self.set_blend(true, FramebufferKind::Other);
+                self.set_blend_mode_multiply(FramebufferKind::Other);
+            } else {
+                self.set_blend(false, FramebufferKind::Other);
+            }
 
-        // draw image masks
-        for (mask_texture_id, items) in list.images.iter() {
-            let _gm2 = self.gpu_profile.start_marker("clip images");
-            let textures = BatchTextures {
-                colors: [
-                    *mask_texture_id,
-                    TextureSource::Invalid,
-                    TextureSource::Invalid,
-                ],
+            let (_gm, source) = {
+                let mut shaders = self.shaders.borrow_mut();
+                let (marker, shader, source) = match batch.kind {
+                    ClipBatchKind::FastRectangle => (
+                        "fast clip rectangles",
+                        &mut shaders.cs_clip_rectangle_fast,
+                        TextureSource::Invalid,
+                    ),
+                    ClipBatchKind::SlowRectangle => (
+                        "slow clip rectangles",
+                        &mut shaders.cs_clip_rectangle_slow,
+                        TextureSource::Invalid,
+                    ),
+                    ClipBatchKind::Image(source) => (
+                        "clip images",
+                        &mut shaders.cs_clip_image,
+                        source,
+                    ),
+                    ClipBatchKind::BoxShadow(source) => (
+                        "box shadows",
+                        &mut shaders.cs_clip_box_shadow,
+                        source,
+                    ),
+                };
+
+                let gm = self.gpu_profile.start_marker(marker);
+                shader.bind(
+                    &mut self.device,
+                    projection,
+                    &mut self.renderer_errors,
+                );
+                (gm, source)
             };
-            self.shaders.borrow_mut().cs_clip_image
-                .bind(&mut self.device, projection, &mut self.renderer_errors);
-            self.draw_instanced_batch(
-                items,
-                VertexArrayKind::Clip,
-                &textures,
+            if source != TextureSource::Invalid {
+                self.bind_textures(&BatchTextures {
+                    colors: [
+                        source,
+                        TextureSource::Invalid,
+                        TextureSource::Invalid,
+                    ],
+                });
+            }
+            self.draw_clips(
+                batch.range,
+                instance_storage,
                 stats,
             );
         }
@@ -5298,6 +5287,7 @@ impl Renderer {
         &mut self,
         draw_target: DrawTarget,
         target: &AlphaRenderTarget,
+        instance_storage: &InstanceStorage,
         projection: &default::Transform3D<f32>,
         render_tasks: &RenderTaskGraph,
         stats: &mut RendererStats,
@@ -5382,26 +5372,11 @@ impl Renderer {
         // Draw the clip items into the tiled alpha mask.
         {
             let _timer = self.gpu_profile.start_timer(GPU_TAG_CACHE_CLIP);
-
             // TODO(gw): Consider grouping multiple clip masks per shader
             //           invocation here to reduce memory bandwith further?
-
-            // Draw the primary clip mask - since this is the first mask
-            // for the task, we can disable blending, knowing that it will
-            // overwrite every pixel in the mask area.
-            self.set_blend(false, FramebufferKind::Other);
             self.draw_clip_batch_list(
-                &target.clip_batcher.primary_clips,
-                projection,
-                stats,
-            );
-
-            // switch to multiplicative blending for secondary masks, using
-            // multiplicative blending to accumulate clips into the mask.
-            self.set_blend(true, FramebufferKind::Other);
-            self.set_blend_mode_multiply(FramebufferKind::Other);
-            self.draw_clip_batch_list(
-                &target.clip_batcher.secondary_clips,
+                &target.clips,
+                instance_storage,
                 projection,
                 stats,
             );
@@ -5772,16 +5747,22 @@ impl Renderer {
 
         // prepare instance data for the whole frame
         assert!(self.device.get_capabilities().supports_base_instance);
-        self.device.bind_vao(&self.vaos.prim_vao);
-        while self.vaos.prim_vao_array.len() < frame.instance_storage.arrays.len() {
+        while self.vaos.prim_vao_array.len() < frame.instance_storage.prims.len() {
             let vao = self.device.create_vao_with_new_instances(&desc::PRIM_INSTANCES, &self.vaos.prim_vao);
             self.vaos.prim_vao_array.push(vao);
         }
-        for (vao, array) in self.vaos.prim_vao_array.iter().zip(frame.instance_storage.arrays.iter_mut()) {
-            // add the terminator index
-            array.start_indices.push(array.data.len() as u32);
-            // actually upload the data
-            self.device.update_vao_instances(vao, &array.data, VertexUsageHint::Stream);
+        for (vao, array) in self.vaos.prim_vao_array.iter().zip(frame.instance_storage.prims.iter_mut()) {
+            self.device.bind_vao(vao);
+            self.device.update_vao_instances(vao, array.seal(), VertexUsageHint::Stream);
+        }
+        {
+            let vao = &self.vaos.clip_vao;
+            self.device.bind_vao(vao);
+            self.device.update_vao_instances(
+                vao,
+                frame.instance_storage.clips.array.seal(),
+                VertexUsageHint::Stream,
+            );
         }
     }
 
@@ -6075,6 +6056,7 @@ impl Renderer {
                         self.draw_alpha_target(
                             draw_target,
                             target,
+                            &frame.instance_storage,
                             &projection,
                             &frame.render_tasks,
                             &mut results.stats,
