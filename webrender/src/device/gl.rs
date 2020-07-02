@@ -1413,7 +1413,12 @@ impl Device {
         // So we must use glTexStorage instead. See bug 1591436.
         let is_emulator = renderer_name.starts_with("Android Emulator");
         let avoid_tex_image = is_emulator;
-        let gl_version = gl.get_string(gl::VERSION);
+        let mut gl_version = [0; 2];
+        unsafe {
+            gl.get_integer_v(gl::MAJOR_VERSION, &mut gl_version[0..1]);
+            gl.get_integer_v(gl::MINOR_VERSION, &mut gl_version[1..2]);
+        }
+        info!("GL context {:?} {}.{}", gl.get_type(), gl_version[0], gl_version[1]);
 
         let supports_texture_storage = allow_texture_storage_support &&
             match gl.get_type() {
@@ -1425,7 +1430,7 @@ impl Device {
         let supports_texture_swizzle = allow_texture_swizzling &&
             match gl.get_type() {
                 // see https://www.g-truc.net/post-0734.html
-                gl::GlType::Gl => gl_version.as_str() >= "3.3" ||
+                gl::GlType::Gl => gl_version >= [3, 3] ||
                     supports_extension(&extensions, "GL_ARB_texture_swizzle"),
                 gl::GlType::Gles => true,
             };
@@ -1557,7 +1562,7 @@ impl Device {
         let supports_shader_storage_object = match gl.get_type() {
             // see https://www.g-truc.net/post-0734.html
             gl::GlType::Gl => supports_extension(&extensions, "GL_ARB_shader_storage_buffer_object"),
-            gl::GlType::Gles => gl_version.as_str() >= "3.1",
+            gl::GlType::Gles => gl_version >= [3, 1],
         };
 
         Device {
