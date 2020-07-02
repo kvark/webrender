@@ -6,6 +6,10 @@
 // Vertex shader attributes and uniforms
 //======================================================================================
 #ifdef WR_VERTEX_SHADER
+    // Uniform inputs
+    uniform mat4 uTransform;       // Orthographic projection
+    // Attribute inputs
+    in vec2 aPosition;
 #endif
 
 //======================================================================================

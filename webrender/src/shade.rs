@@ -57,6 +57,7 @@ const DITHERING_FEATURE: &str = "DITHERING";
 const DUAL_SOURCE_FEATURE: &str = "DUAL_SOURCE_BLENDING";
 const FAST_PATH_FEATURE: &str = "FAST_PATH";
 const PIXEL_LOCAL_STORAGE_FEATURE: &str = "PIXEL_LOCAL_STORAGE";
+const STORAGE_BUFFER_FEATURE: &str = "STORAGE_BUFFER";
 
 pub(crate) enum ShaderKind {
     Primitive,
@@ -85,20 +86,13 @@ impl LazilyCompiledShader {
     pub(crate) fn new(
         kind: ShaderKind,
         name: &'static str,
-        features: &[&'static str],
+        unsorted_features: &[&'static str],
         device: &mut Device,
         precache_flags: ShaderPrecacheFlags,
         shader_list: &ShaderFeatures,
     ) -> Result<Self, ShaderError> {
-        let mut shader = LazilyCompiledShader {
-            program: None,
-            name,
-            kind,
-            //Note: this isn't really the default state, but there is no chance
-            // an actual projection passed here would accidentally match.
-            cached_projection: Transform3D::identity(),
-            features: features.to_vec(),
-        };
+        let mut features = unsorted_features.to_vec();
+        features.sort();
 
         // Ensure this shader config is in the available shader list so that we get
         // alerted if the list gets out-of-date when shaders or features are added.
@@ -110,6 +104,16 @@ impl LazilyCompiledShader {
             config,
         );
 
+        let mut shader = LazilyCompiledShader {
+            program: None,
+            name,
+            kind,
+            //Note: this isn't really the default state, but there is no chance
+            // an actual projection passed here would accidentally match.
+            cached_projection: Transform3D::identity(),
+            features,
+        };
+
         if precache_flags.intersects(ShaderPrecacheFlags::ASYNC_COMPILE | ShaderPrecacheFlags::FULL_COMPILE) {
             let t0 = precise_time_ns();
             shader.get_internal(device, precache_flags)?;
@@ -117,7 +121,7 @@ impl LazilyCompiledShader {
             debug!("[C: {:.1} ms ] Precache {} {:?}",
                 (t1 - t0) as f64 / 1000000.0,
                 name,
-                features
+                unsorted_features
             );
         }
 
@@ -307,17 +311,22 @@ impl BrushShader {
         use_advanced_blend: bool,
         use_dual_source: bool,
         use_pixel_local_storage: bool,
+        use_shader_storage_object: bool,
     ) -> Result<Self, ShaderError> {
+        let mut opaque_features = features.to_vec();
+        if use_shader_storage_object {
+            opaque_features.push(STORAGE_BUFFER_FEATURE);
+        }
         let opaque = LazilyCompiledShader::new(
             ShaderKind::Brush,
             name,
-            features,
+            &opaque_features,
             device,
             precache_flags,
             &shader_list,
         )?;
 
-        let mut alpha_features = features.to_vec();
+        let mut alpha_features = opaque_features.to_vec();
         alpha_features.push(ALPHA_FEATURE);
         if use_pixel_local_storage {
             alpha_features.push(PIXEL_LOCAL_STORAGE_FEATURE);
@@ -610,6 +619,9 @@ impl Shaders {
         let use_advanced_blend_equation =
             device.get_capabilities().supports_advanced_blend_equation &&
             options.allow_advanced_blend_equation;
+        let use_shader_storage_object =
+            device.get_capabilities().supports_shader_storage_object &&
+            options.max_storage_instances.is_some();
 
         let mut shader_flags = match gl_type {
             GlType::Gl => ShaderFeatureFlags::GL,
@@ -618,6 +630,7 @@ impl Shaders {
         shader_flags.set(ShaderFeatureFlags::PIXEL_LOCAL_STORAGE, use_pixel_local_storage);
         shader_flags.set(ShaderFeatureFlags::ADVANCED_BLEND_EQUATION, use_advanced_blend_equation);
         shader_flags.set(ShaderFeatureFlags::DUAL_SOURCE_BLENDING, use_dual_source_blending);
+        shader_flags.set(ShaderFeatureFlags::STORAGE_BUFFER, use_shader_storage_object);
         shader_flags.set(ShaderFeatureFlags::DITHERING, options.enable_dithering);
         let shader_list = get_shader_features(shader_flags);
 
@@ -630,6 +643,7 @@ impl Shaders {
             false /* advanced blend */,
             false /* dual source */,
             use_pixel_local_storage,
+            use_shader_storage_object,
         )?;
 
         let brush_blend = BrushShader::new(
@@ -641,6 +655,7 @@ impl Shaders {
             false /* advanced blend */,
             false /* dual source */,
             use_pixel_local_storage,
+            use_shader_storage_object,
         )?;
 
         let brush_mix_blend = BrushShader::new(
@@ -652,6 +667,7 @@ impl Shaders {
             false /* advanced blend */,
             false /* dual source */,
             use_pixel_local_storage,
+            use_shader_storage_object,
         )?;
 
         let brush_conic_gradient = BrushShader::new(
@@ -667,6 +683,7 @@ impl Shaders {
             false /* advanced blend */,
             false /* dual source */,
             use_pixel_local_storage,
+            use_shader_storage_object,
         )?;
 
         let brush_radial_gradient = BrushShader::new(
@@ -682,6 +699,7 @@ impl Shaders {
             false /* advanced blend */,
             false /* dual source */,
             use_pixel_local_storage,
+            use_shader_storage_object,
         )?;
 
         let brush_linear_gradient = BrushShader::new(
@@ -697,6 +715,7 @@ impl Shaders {
             false /* advanced blend */,
             false /* dual source */,
             use_pixel_local_storage,
+            use_shader_storage_object,
         )?;
 
         let brush_opacity = BrushShader::new(
@@ -708,6 +727,7 @@ impl Shaders {
             false /* advanced blend */,
             false /* dual source */,
             use_pixel_local_storage,
+            use_shader_storage_object,
         )?;
 
         let cs_blur_a8 = LazilyCompiledShader::new(
@@ -811,22 +831,27 @@ impl Shaders {
         // TODO(gw): The split composite + text shader are special cases - the only
         //           shaders used during normal scene rendering that aren't a brush
         //           shader. Perhaps we can unify these in future?
-        let mut extra_features = Vec::new();
+        let mut extra_prim_features = Vec::new();
         if use_pixel_local_storage {
-            extra_features.push(PIXEL_LOCAL_STORAGE_FEATURE);
+            extra_prim_features.push(PIXEL_LOCAL_STORAGE_FEATURE);
+        }
+        if use_shader_storage_object {
+            extra_prim_features.push(STORAGE_BUFFER_FEATURE);
         }
 
         let ps_text_run = TextShader::new("ps_text_run",
             device,
-            &extra_features,
+            &extra_prim_features,
             options.precache_flags,
             &shader_list,
         )?;
 
         let ps_text_run_dual_source = if use_dual_source_blending {
+            let mut dual_source_features = extra_prim_features.clone();
+            dual_source_features.push(DUAL_SOURCE_FEATURE);
             Some(TextShader::new("ps_text_run",
                 device,
-                &[DUAL_SOURCE_FEATURE],
+                &dual_source_features,
                 options.precache_flags,
                 &shader_list,
             )?)
@@ -837,7 +862,7 @@ impl Shaders {
         let ps_split_composite = LazilyCompiledShader::new(
             ShaderKind::Primitive,
             "ps_split_composite",
-            &extra_features,
+            &extra_prim_features,
             device,
             options.precache_flags,
             &shader_list,
@@ -846,7 +871,7 @@ impl Shaders {
         let ps_clear = LazilyCompiledShader::new(
             ShaderKind::Clear,
             "ps_clear",
-            &extra_features,
+            &extra_prim_features,
             device,
             options.precache_flags,
             &shader_list,
@@ -880,6 +905,7 @@ impl Shaders {
                 use_advanced_blend_equation,
                 use_dual_source_blending,
                 use_pixel_local_storage,
+                use_shader_storage_object,
             )?);
 
             image_features.push("REPETITION");
@@ -894,6 +920,7 @@ impl Shaders {
                 use_advanced_blend_equation,
                 use_dual_source_blending,
                 use_pixel_local_storage,
+                use_shader_storage_object,
             )?);
 
             image_features.clear();
@@ -931,6 +958,7 @@ impl Shaders {
                     false /* advanced blend */,
                     false /* dual source */,
                     use_pixel_local_storage,
+                    use_shader_storage_object,
                 )?;
 
                 let composite_yuv_shader = LazilyCompiledShader::new(

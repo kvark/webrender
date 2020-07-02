@@ -167,9 +167,11 @@ pub fn build_shader_prefix_string<F: FnMut(&str)>(
    base_filename: &str,
    output: &mut F,
 ) {
+    let has_ssbo = features.contains(&"STORAGE_BUFFER");
     // GLSL requires that the version number comes first.
     let gl_version_string = match gl_version {
         ShaderVersion::Gl => "#version 150\n",
+        ShaderVersion::Gles if has_ssbo => "#version 310 es\n",
         ShaderVersion::Gles => "#version 300 es\n",
     };
     output(gl_version_string);

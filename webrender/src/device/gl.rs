@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use super::super::shader_source::{OPTIMIZED_SHADERS, UNOPTIMIZED_SHADERS};
+use super::super::shader_source::{UNOPTIMIZED_SHADERS};
 use api::{ColorF, ImageDescriptor, ImageFormat, MemoryReport};
 use api::{MixBlendMode, TextureTarget, VoidPtrToSizeFn};
 use api::units::*;
@@ -312,15 +312,22 @@ impl VertexDescriptor {
 }
 
 impl VBOId {
+    const INVALID: Self = VBOId(0);
     fn bind(&self, gl: &dyn gl::Gl) {
         gl.bind_buffer(gl::ARRAY_BUFFER, self.0);
     }
 }
 
 impl IBOId {
+    //const INVALID: Self = IBOId(0);
     fn bind(&self, gl: &dyn gl::Gl) {
         gl.bind_buffer(gl::ELEMENT_ARRAY_BUFFER, self.0);
     }
+}
+
+impl SBOId {
+    const INVALID: Self = SBOId(0);
+    const BIND_POINT: gl::GLenum = gl::SHADER_STORAGE_BUFFER;
 }
 
 impl FBOId {
@@ -582,6 +589,8 @@ pub struct VAO {
     main_vbo_id: VBOId,
     instance_vbo_id: VBOId,
     instance_stride: usize,
+    storage_id: SBOId,
+    //TODO: rename
     owns_vertices_and_indices: bool,
 }
 
@@ -638,10 +647,14 @@ pub struct VBOId(gl::GLuint);
 #[derive(PartialEq, Eq, Hash, Debug, Copy, Clone)]
 struct IBOId(gl::GLuint);
 
+// Storage buffer
+#[derive(PartialEq, Eq, Hash, Debug, Copy, Clone)]
+struct SBOId(gl::GLuint);
+
 #[derive(Clone, Debug)]
 enum ProgramSourceType {
     Unoptimized,
-    Optimized(ShaderVersion),
+    //Optimized(ShaderVersion),
 }
 
 #[derive(Clone, Debug)]
@@ -672,18 +685,18 @@ impl ProgramSourceInfo {
         // Hash the renderer name.
         hasher.write(device.capabilities.renderer_name.as_bytes());
 
-        let full_name = &Self::full_name(name, features);
-
-        let optimized_source = if device.use_optimized_shaders {
+        let _full_name = &Self::full_name(name, features);
+        let _ = device.use_optimized_shaders;
+        /*let optimized_source = if device.use_optimized_shaders {
             OPTIMIZED_SHADERS.get(&(gl_version, full_name)).or_else(|| {
                 warn!("Missing optimized shader source for {}", full_name);
                 None
             })
         } else {
             None
-        };
+        };*/
 
-        let source_type = match optimized_source {
+        let source_type = /*match optimized_source {
             Some(source_and_digest) => {
                 // Optimized shader sources are used as-is, without any run-time processing.
                 // The vertex and fragment shaders are different, so must both be hashed.
@@ -702,7 +715,7 @@ impl ProgramSourceInfo {
 
                 ProgramSourceType::Optimized(gl_version)
             }
-            None => {
+            None => */{
                 // For non-optimized sources we compute the hash by walking the static strings
                 // in the same order as we would when concatenating the source, to avoid
                 // heap-allocating in the common case.
@@ -741,7 +754,7 @@ impl ProgramSourceInfo {
                 }
 
                 ProgramSourceType::Unoptimized
-            }
+            //}
         };
 
         // Finish.
@@ -754,9 +767,9 @@ impl ProgramSourceInfo {
     }
 
     fn compute_source(&self, device: &Device, kind: ShaderKind) -> String {
-        let full_name = Self::full_name(self.base_filename, &self.features);
+        let _full_name = Self::full_name(self.base_filename, &self.features);
         match self.source_type {
-            ProgramSourceType::Optimized(gl_version) => {
+            /*ProgramSourceType::Optimized(_gl_version) => {
                 let shader = OPTIMIZED_SHADERS
                     .get(&(gl_version, &full_name))
                     .unwrap_or_else(|| panic!("Missing optimized shader source for {}", full_name));
@@ -765,7 +778,7 @@ impl ProgramSourceInfo {
                     ShaderKind::Vertex => shader.vert_source.to_string(),
                     ShaderKind::Fragment => shader.frag_source.to_string(),
                 }
-            },
+            },*/
             ProgramSourceType::Unoptimized => {
                 let mut src = String::new();
                 device.build_shader_string(
@@ -953,6 +966,8 @@ pub struct Capabilities {
     pub supports_nonzero_pbo_offsets: bool,
     /// Whether the driver supports specifying the texture usage up front.
     pub supports_texture_usage: bool,
+    /// Whether we can use SSBOs.
+    pub supports_shader_storage_object: bool,
     /// The name of the renderer, as reported by GL
     pub renderer_name: String,
 }
@@ -1539,6 +1554,12 @@ impl Device {
         // from a non-zero offset within a PBO to fail. See bug 1603783.
         let supports_nonzero_pbo_offsets = !is_amd_macos;
 
+        let supports_shader_storage_object = match gl.get_type() {
+            // see https://www.g-truc.net/post-0734.html
+            gl::GlType::Gl => supports_extension(&extensions, "GL_ARB_shader_storage_buffer_object"),
+            gl::GlType::Gles => gl_version.as_str() >= "3.1",
+        };
+
         Device {
             gl,
             base_gl: None,
@@ -1558,6 +1579,7 @@ impl Device {
                 supports_texture_swizzle,
                 supports_nonzero_pbo_offsets,
                 supports_texture_usage,
+                supports_shader_storage_object,
                 renderer_name,
             },
 
@@ -3118,7 +3140,30 @@ impl Device {
             main_vbo_id,
             instance_vbo_id,
             instance_stride,
+            storage_id: SBOId::INVALID,
             owns_vertices_and_indices,
+        }
+    }
+
+    pub fn create_storage_vao(
+        &mut self,
+    ) -> VAO {
+        let buffer_ids = self.gl.gen_buffers(2);
+        let ibo_id = IBOId(buffer_ids[0]);
+        let storage_id = SBOId(buffer_ids[1]);
+
+        let vao_id = self.gl.gen_vertex_arrays(1)[0];
+        self.bind_vao_impl(vao_id);
+        ibo_id.bind(self.gl()); // force it to be a part of VAO
+
+        VAO {
+            id: vao_id,
+            ibo_id,
+            main_vbo_id: VBOId::INVALID,
+            instance_vbo_id: VBOId::INVALID,
+            instance_stride: 0,
+            storage_id,
+            owns_vertices_and_indices: false,
         }
     }
 
@@ -3188,7 +3233,11 @@ impl Device {
             self.gl.delete_buffers(&[vao.main_vbo_id.0]);
         }
 
-        self.gl.delete_buffers(&[vao.instance_vbo_id.0])
+        if vao.instance_vbo_id != VBOId::INVALID {
+            self.gl.delete_buffers(&[vao.instance_vbo_id.0])
+        } else {
+            self.gl.delete_buffers(&[vao.storage_id.0])
+        }
     }
 
     pub fn allocate_vbo<V>(
@@ -3281,6 +3330,26 @@ impl Device {
         self.update_vbo_data(vao.instance_vbo_id, instances, usage_hint)
     }
 
+    pub fn update_vao_storage<V>(
+        &mut self,
+        vao: &VAO,
+        storage: &[V],
+        shader_location: gl::GLuint,
+        usage_hint: VertexUsageHint,
+    ) {
+        debug_assert!(self.inside_frame);
+        debug_assert_eq!(self.bound_vao, vao.id);
+        //debug_assert_eq!(vao.instance_stride as usize, mem::size_of::<V>());
+
+        self.gl.bind_buffer_base(SBOId::BIND_POINT, shader_location, vao.storage_id.0);
+        gl::buffer_data(
+            self.gl(),
+            SBOId::BIND_POINT,
+            storage,
+            usage_hint.to_gl(),
+        );
+    }
+
     pub fn update_vao_indices<I>(&mut self, vao: &VAO, indices: &[I], usage_hint: VertexUsageHint) {
         debug_assert!(self.inside_frame);
         debug_assert_eq!(self.bound_vao, vao.id);
@@ -3294,7 +3363,7 @@ impl Device {
         );
     }
 
-    pub fn draw_triangles_u16(&mut self, first_vertex: i32, index_count: i32) {
+    pub fn draw_triangles_u16(&mut self, first_index: i32, index_count: i32) {
         debug_assert!(self.inside_frame);
         #[cfg(debug_assertions)]
         debug_assert!(self.shader_is_ready);
@@ -3303,11 +3372,11 @@ impl Device {
             gl::TRIANGLES,
             index_count,
             gl::UNSIGNED_SHORT,
-            first_vertex as u32 * 2,
+            first_index as u32 * 2,
         );
     }
 
-    pub fn draw_triangles_u32(&mut self, first_vertex: i32, index_count: i32) {
+    pub fn draw_triangles_u32(&mut self, first_index: i32, index_count: i32) {
         debug_assert!(self.inside_frame);
         #[cfg(debug_assertions)]
         debug_assert!(self.shader_is_ready);
@@ -3316,7 +3385,7 @@ impl Device {
             gl::TRIANGLES,
             index_count,
             gl::UNSIGNED_INT,
-            first_vertex as u32 * 4,
+            first_index as u32 * 4,
         );
     }
 

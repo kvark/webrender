@@ -46,12 +46,13 @@ struct SplitCompositeInstance {
 };
 
 SplitCompositeInstance fetch_composite_instance() {
+    ivec4 data = raw_instance_data();
     SplitCompositeInstance ci;
 
-    ci.prim_header_index = aData.x;
-    ci.polygons_address = aData.y;
-    ci.z = float(aData.z);
-    ci.render_task_index = aData.w;
+    ci.prim_header_index = data.x;
+    ci.polygons_address = data.y;
+    ci.z = float(data.z);
+    ci.render_task_index = data.w;
 
     return ci;
 }
@@ -68,9 +69,10 @@ void main(void) {
     vec2 dest_origin = dest_task.common_data.task_rect.p0 -
                        dest_task.content_origin;
 
+    vec2 quad_pos = quad_position();
     vec2 local_pos = bilerp(geometry.local[0], geometry.local[1],
                             geometry.local[3], geometry.local[2],
-                            aPosition.y, aPosition.x);
+                            quad_pos.y, quad_pos.x);
     vec4 world_pos = transform.m * vec4(local_pos, 0.0, 1.0);
 
     vec4 final_pos = vec4(

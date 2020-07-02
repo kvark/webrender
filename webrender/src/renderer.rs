@@ -104,6 +104,7 @@ use std::collections::hash_map::Entry;
 use std::f32;
 use std::marker::PhantomData;
 use std::mem;
+use std::num::NonZeroUsize;
 use std::os::raw::c_void;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -408,13 +409,7 @@ pub(crate) mod desc {
     use crate::device::{VertexAttribute, VertexAttributeKind, VertexDescriptor};
 
     pub const PRIM_INSTANCES: VertexDescriptor = VertexDescriptor {
-        vertex_attributes: &[
-            VertexAttribute {
-                name: "aPosition",
-                count: 2,
-                kind: VertexAttributeKind::F32,
-            },
-        ],
+        vertex_attributes: &[],
         instance_attributes: &[
             VertexAttribute {
                 name: "aData",
@@ -425,13 +420,7 @@ pub(crate) mod desc {
     };
 
     pub const BLUR: VertexDescriptor = VertexDescriptor {
-        vertex_attributes: &[
-            VertexAttribute {
-                name: "aPosition",
-                count: 2,
-                kind: VertexAttributeKind::F32,
-            },
-        ],
+        vertex_attributes: &[],
         instance_attributes: &[
             VertexAttribute {
                 name: "aBlurRenderTaskAddress",
@@ -452,13 +441,7 @@ pub(crate) mod desc {
     };
 
     pub const LINE: VertexDescriptor = VertexDescriptor {
-        vertex_attributes: &[
-            VertexAttribute {
-                name: "aPosition",
-                count: 2,
-                kind: VertexAttributeKind::F32,
-            },
-        ],
+        vertex_attributes: &[],
         instance_attributes: &[
             VertexAttribute {
                 name: "aTaskRect",
@@ -489,13 +472,7 @@ pub(crate) mod desc {
     };
 
     pub const GRADIENT: VertexDescriptor = VertexDescriptor {
-        vertex_attributes: &[
-            VertexAttribute {
-                name: "aPosition",
-                count: 2,
-                kind: VertexAttributeKind::F32,
-            },
-        ],
+        vertex_attributes: &[],
         instance_attributes: &[
             VertexAttribute {
                 name: "aTaskRect",
@@ -545,13 +522,7 @@ pub(crate) mod desc {
     };
 
     pub const BORDER: VertexDescriptor = VertexDescriptor {
-        vertex_attributes: &[
-            VertexAttribute {
-                name: "aPosition",
-                count: 2,
-                kind: VertexAttributeKind::F32,
-            },
-        ],
+        vertex_attributes: &[],
         instance_attributes: &[
             VertexAttribute {
                 name: "aTaskOrigin",
@@ -602,13 +573,7 @@ pub(crate) mod desc {
     };
 
     pub const SCALE: VertexDescriptor = VertexDescriptor {
-        vertex_attributes: &[
-            VertexAttribute {
-                name: "aPosition",
-                count: 2,
-                kind: VertexAttributeKind::F32,
-            },
-        ],
+        vertex_attributes: &[],
         instance_attributes: &[
             VertexAttribute {
                 name: "aScaleTargetRect",
@@ -629,13 +594,7 @@ pub(crate) mod desc {
     };
 
     pub const CLIP: VertexDescriptor = VertexDescriptor {
-        vertex_attributes: &[
-            VertexAttribute {
-                name: "aPosition",
-                count: 2,
-                kind: VertexAttributeKind::F32,
-            },
-        ],
+        vertex_attributes: &[],
         instance_attributes: &[
             VertexAttribute {
                 name: "aTransformIds",
@@ -692,13 +651,7 @@ pub(crate) mod desc {
     };
 
     pub const RESOLVE: VertexDescriptor = VertexDescriptor {
-        vertex_attributes: &[
-            VertexAttribute {
-                name: "aPosition",
-                count: 2,
-                kind: VertexAttributeKind::F32,
-            },
-        ],
+        vertex_attributes: &[],
         instance_attributes: &[
             VertexAttribute {
                 name: "aRect",
@@ -709,13 +662,7 @@ pub(crate) mod desc {
     };
 
     pub const SVG_FILTER: VertexDescriptor = VertexDescriptor {
-        vertex_attributes: &[
-            VertexAttribute {
-                name: "aPosition",
-                count: 2,
-                kind: VertexAttributeKind::F32,
-            },
-        ],
+        vertex_attributes: &[],
         instance_attributes: &[
             VertexAttribute {
                 name: "aFilterRenderTaskAddress",
@@ -840,13 +787,7 @@ pub(crate) mod desc {
     };
 
     pub const COMPOSITE: VertexDescriptor = VertexDescriptor {
-        vertex_attributes: &[
-            VertexAttribute {
-                name: "aPosition",
-                count: 2,
-                kind: VertexAttributeKind::F32,
-            },
-        ],
+        vertex_attributes: &[],
         instance_attributes: &[
             VertexAttribute {
                 name: "aDeviceRect",
@@ -892,13 +833,7 @@ pub(crate) mod desc {
     };
 
     pub const CLEAR: VertexDescriptor = VertexDescriptor {
-        vertex_attributes: &[
-            VertexAttribute {
-                name: "aPosition",
-                count: 2,
-                kind: VertexAttributeKind::F32,
-            },
-        ],
+        vertex_attributes: &[],
         instance_attributes: &[
             VertexAttribute {
                 name: "aRect",
@@ -1907,6 +1842,7 @@ impl LazyInitializedDebugRenderer {
 // `Renderer::deinit()` below.
 pub struct RendererVAOs {
     prim_vao: VAO,
+    prim_storage_vao: Option<VAO>,
     blur_vao: VAO,
     clip_vao: VAO,
     border_vao: VAO,
@@ -2380,18 +2316,33 @@ impl Renderer {
         let x1 = 1.0;
         let y1 = 1.0;
 
-        let quad_indices: [u16; 6] = [0, 1, 2, 2, 1, 3];
         let quad_vertices = [
             PackedVertex { pos: [x0, y0] },
             PackedVertex { pos: [x1, y0] },
             PackedVertex { pos: [x0, y1] },
             PackedVertex { pos: [x1, y1] },
         ];
-
+        let quad_indices: [u16; 6] = [0, 1, 2, 2, 1, 3];
         let prim_vao = device.create_vao(&desc::PRIM_INSTANCES);
         device.bind_vao(&prim_vao);
         device.update_vao_indices(&prim_vao, &quad_indices, VertexUsageHint::Static);
         device.update_vao_main_vertices(&prim_vao, &quad_vertices, VertexUsageHint::Static);
+
+        let use_shader_storage_object = options.max_storage_instances.is_some() &&
+            device.get_capabilities().supports_shader_storage_object;
+        info!("Using SSBO: {}", use_shader_storage_object);
+        let (prim_storage_vao, max_primitive_instance_count) = if use_shader_storage_object {
+            let instance_count = options.max_storage_instances.unwrap().get();
+            let expanded_incides = (0 .. instance_count)
+                .flat_map(|quad| quad_indices.iter().map(move |&index| quad as u16 * 4 + index))
+                .collect::<Vec<_>>();
+            let prim_storage_vao = device.create_storage_vao();
+            device.bind_vao(&prim_storage_vao);
+            device.update_vao_indices(&prim_storage_vao, &expanded_incides, VertexUsageHint::Static);
+            (Some(prim_storage_vao), instance_count)
+        } else {
+            (None, options.max_instance_buffer_size / mem::size_of::<PrimitiveInstanceData>())
+        };
 
         let blur_vao = device.create_vao_with_new_instances(&desc::BLUR, &prim_vao);
         let clip_vao = device.create_vao_with_new_instances(&desc::CLIP, &prim_vao);
@@ -2682,6 +2633,7 @@ impl Renderer {
             gpu_profile,
             vaos: RendererVAOs {
                 prim_vao,
+                prim_storage_vao,
                 blur_vao,
                 clip_vao,
                 border_vao,
@@ -2728,7 +2680,7 @@ impl Renderer {
             allocated_native_surfaces: FastHashSet::default(),
             debug_overlay_state: DebugOverlayState::new(),
             prev_dirty_rect: DeviceRect::zero(),
-            max_primitive_instance_count: options.max_instance_buffer_size / mem::size_of::<PrimitiveInstanceData>(),
+            max_primitive_instance_count,
         };
 
         // We initially set the flags to default and then now call set_debug_flags
@@ -4068,10 +4020,16 @@ impl Renderer {
         };
 
         for chunk in data.chunks(chunk_size) {
-            self.device
-                .update_vao_instances(vao, chunk, ONE_TIME_USAGE_HINT);
-            self.device
-                .draw_indexed_triangles_instanced_u16(6, chunk.len() as i32);
+            if vertex_array_kind == VertexArrayKind::Primitive && self.vaos.prim_storage_vao.is_some() {
+                self.device.update_vao_storage(vao, chunk, 0, ONE_TIME_USAGE_HINT);
+                self.device
+                    .draw_triangles_u16(0, 6 * chunk.len() as i32);
+            } else {
+                self.device
+                    .update_vao_instances(vao, chunk, ONE_TIME_USAGE_HINT);
+                self.device
+                    .draw_indexed_triangles_instanced_u16(6, chunk.len() as i32);
+            }
             self.profile_counters.draw_calls.inc();
             stats.total_draw_calls += 1;
         }
@@ -4542,8 +4500,13 @@ impl Renderer {
                     // are all set up from the previous draw_instanced_batch call,
                     // so just issue a draw call here to avoid re-uploading the
                     // instances and re-binding textures etc.
-                    self.device
-                        .draw_indexed_triangles_instanced_u16(6, batch.instances.len() as i32);
+                    if self.device.get_capabilities().supports_shader_storage_object {
+                        self.device
+                            .draw_triangles_u16(0, 6 * batch.instances.len() as i32);
+                    } else {
+                        self.device
+                            .draw_indexed_triangles_instanced_u16(6, batch.instances.len() as i32);
+                    }
 
                     self.set_blend_mode_subpixel_with_bg_color_pass2(framebuffer_kind);
                     // re-binding the shader after the blend mode change
@@ -4554,8 +4517,13 @@ impl Renderer {
                     );
                     self.device.switch_mode(ShaderColorMode::SubpixelWithBgColorPass2 as _);
 
-                    self.device
-                        .draw_indexed_triangles_instanced_u16(6, batch.instances.len() as i32);
+                    if self.device.get_capabilities().supports_shader_storage_object {
+                        self.device
+                            .draw_triangles_u16(0, 6 * batch.instances.len() as i32);
+                    } else {
+                        self.device
+                            .draw_indexed_triangles_instanced_u16(6, batch.instances.len() as i32);
+                    }
                 }
 
                 if batch.key.blend_mode == BlendMode::SubpixelWithBgColor {
@@ -6755,6 +6723,9 @@ impl Renderer {
         self.device.delete_pbo(self.texture_cache_upload_pbo);
         self.texture_resolver.deinit(&mut self.device);
         self.device.delete_vao(self.vaos.prim_vao);
+        if let Some(vao) = self.vaos.prim_storage_vao {
+            self.device.delete_vao(vao);
+        }
         self.device.delete_vao(self.vaos.resolve_vao);
         self.device.delete_vao(self.vaos.clip_vao);
         self.device.delete_vao(self.vaos.gradient_vao);
@@ -7048,6 +7019,8 @@ pub struct RendererOptions {
     /// Having a limit here allows the drivers to more easily manage
     /// the PBOs for us.
     pub max_instance_buffer_size: usize,
+
+    pub max_storage_instances: Option<NonZeroUsize>,
 }
 
 impl Default for RendererOptions {
@@ -7107,6 +7080,9 @@ impl Default for RendererOptions {
             texture_cache_max_evictions_per_frame: 32,
             // Actual threshold in macOS GL drivers
             max_instance_buffer_size: 0x20000,
+            // with each primitive instance being 16 bytes, this would be
+            // the corresponding limit on the instance count.
+            max_storage_instances: NonZeroUsize::new(0x2000),
         }
     }
 }
@@ -7631,7 +7607,7 @@ impl Renderer {
 
 fn get_vao(vertex_array_kind: VertexArrayKind, vaos: &RendererVAOs) -> &VAO {
     match vertex_array_kind {
-        VertexArrayKind::Primitive => &vaos.prim_vao,
+        VertexArrayKind::Primitive => vaos.prim_storage_vao.as_ref().unwrap_or(&vaos.prim_vao),
         VertexArrayKind::Clip => &vaos.clip_vao,
         VertexArrayKind::Blur => &vaos.blur_vao,
         VertexArrayKind::VectorStencil | VertexArrayKind::VectorCover => unreachable!(),

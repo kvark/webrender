@@ -30,6 +30,14 @@
 #endif
 #endif
 
+#ifdef WR_FEATURE_STORAGE_BUFFER
+#ifdef GL_ES
+// require GLSL ES 3.1
+#else
+#extension GL_ARB_shader_storage_buffer_object : require
+#endif
+#endif
+
 #include base
 
 #if defined(WR_FEATURE_TEXTURE_EXTERNAL) || defined(WR_FEATURE_TEXTURE_RECT) || defined(WR_FEATURE_TEXTURE_2D)
@@ -49,15 +57,16 @@
     // Uniform inputs
     uniform mat4 uTransform;       // Orthographic projection
 
-    // Attribute inputs
-    in vec2 aPosition;
-
     // get_fetch_uv is a macro to work around a macOS Intel driver parsing bug.
     // TODO: convert back to a function once the driver issues are resolved, if ever.
     // https://github.com/servo/webrender/pull/623
     // https://github.com/servo/servo/issues/13953
     // Do the division with unsigned ints because that's more efficient with D3D
     #define get_fetch_uv(i, vpi)  ivec2(int(vpi * (uint(i) % (WR_MAX_VERTEX_TEXTURE_WIDTH/vpi))), int(uint(i) / (WR_MAX_VERTEX_TEXTURE_WIDTH/vpi)))
+
+    vec2 quad_position() {
+        return vec2(ivec2(gl_VertexID, gl_VertexID>>1) & 1);
+    }
 #endif
 
 //======================================================================================
