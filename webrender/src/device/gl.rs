@@ -302,14 +302,16 @@ impl VertexDescriptor {
         }
     }
 
-    fn bind(&self, gl: &dyn gl::Gl, main: VBOId, instance: VBOId) {
+    fn bind(&self, gl: &dyn gl::Gl, main: VBOId, instance: VBOId, instance_divisor: u32) {
         Self::bind_attributes(self.vertex_attributes, 0, 0, gl, main);
 
         if !self.instance_attributes.is_empty() {
             Self::bind_attributes(
                 self.instance_attributes,
                 self.vertex_attributes.len(),
-                1, gl, instance,
+                instance_divisor,
+                gl,
+                instance,
             );
         }
     }
@@ -597,6 +599,7 @@ pub struct VAO {
     main_vbo_id: VBOId,
     instance_vbo_id: VBOId,
     instance_stride: usize,
+    instance_divisor: u32,
     owns_vertices_and_indices: bool,
 }
 
@@ -3180,6 +3183,7 @@ impl Device {
         descriptor: &VertexDescriptor,
         main_vbo_id: VBOId,
         instance_vbo_id: VBOId,
+        instance_divisor: u32,
         ibo_id: IBOId,
         owns_vertices_and_indices: bool,
     ) -> VAO {
@@ -3188,7 +3192,7 @@ impl Device {
 
         self.bind_vao_impl(vao_id);
 
-        descriptor.bind(self.gl(), main_vbo_id, instance_vbo_id);
+        descriptor.bind(self.gl(), main_vbo_id, instance_vbo_id, instance_divisor);
         ibo_id.bind(self.gl()); // force it to be a part of VAO
 
         VAO {
@@ -3197,6 +3201,7 @@ impl Device {
             main_vbo_id,
             instance_vbo_id,
             instance_stride,
+            instance_divisor,
             owns_vertices_and_indices,
         }
     }
@@ -3247,7 +3252,7 @@ impl Device {
         vbo.id = 0;
     }
 
-    pub fn create_vao(&mut self, descriptor: &VertexDescriptor) -> VAO {
+    pub fn create_vao(&mut self, descriptor: &VertexDescriptor, instance_divisor: u32) -> VAO {
         debug_assert!(self.inside_frame);
 
         let buffer_ids = self.gl.gen_buffers(3);
@@ -3255,7 +3260,7 @@ impl Device {
         let main_vbo_id = VBOId(buffer_ids[1]);
         let intance_vbo_id = VBOId(buffer_ids[2]);
 
-        self.create_vao_with_vbos(descriptor, main_vbo_id, intance_vbo_id, ibo_id, true)
+        self.create_vao_with_vbos(descriptor, main_vbo_id, intance_vbo_id, instance_divisor, ibo_id, true)
     }
 
     pub fn delete_vao(&mut self, mut vao: VAO) {
@@ -3333,6 +3338,7 @@ impl Device {
             descriptor,
             base_vao.main_vbo_id,
             intance_vbo_id,
+            base_vao.instance_divisor,
             base_vao.ibo_id,
             false,
         )
@@ -3413,6 +3419,19 @@ impl Device {
         debug_assert!(self.shader_is_ready);
 
         self.gl.draw_arrays(gl::LINES, first_vertex, vertex_count);
+    }
+
+    pub fn draw_indexed_triangles(&mut self, index_count: i32) {
+        debug_assert!(self.inside_frame);
+        #[cfg(debug_assertions)]
+        debug_assert!(self.shader_is_ready);
+
+        self.gl.draw_elements(
+            gl::TRIANGLES,
+            index_count,
+            gl::UNSIGNED_SHORT,
+            0,
+        );
     }
 
     pub fn draw_indexed_triangles_instanced_u16(&mut self, index_count: i32, instance_count: i32) {

@@ -105,6 +105,7 @@ use std::{
     collections::VecDeque,
     f32,
     mem,
+    num::NonZeroUsize,
     os::raw::c_void,
     path::PathBuf,
     rc::Rc,
@@ -859,6 +860,8 @@ pub struct Renderer {
     buffer_damage_tracker: BufferDamageTracker,
 
     max_primitive_instance_count: usize,
+    enable_instancing: bool,
+    temp_vertices: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -1066,7 +1069,12 @@ impl Renderer {
             None
         };
 
-        let vaos = vertex::RendererVAOs::new(&mut device);
+        let max_primitive_instance_count =
+            RendererOptions::MAX_INSTANCE_BUFFER_SIZE / mem::size_of::<PrimitiveInstanceData>();
+        let vaos = vertex::RendererVAOs::new(
+            &mut device,
+            if options.enable_instancing { None } else { NonZeroUsize::new(max_primitive_instance_count) },
+        );
 
         let texture_upload_pbo_pool = UploadPBOPool::new(&mut device, options.upload_pbo_default_size);
         let texture_resolver = TextureResolver::new(&mut device);
@@ -1378,8 +1386,9 @@ impl Renderer {
             allocated_native_surfaces: FastHashSet::default(),
             debug_overlay_state: DebugOverlayState::new(),
             buffer_damage_tracker: BufferDamageTracker::default(),
-            max_primitive_instance_count:
-                RendererOptions::MAX_INSTANCE_BUFFER_SIZE / mem::size_of::<PrimitiveInstanceData>(),
+            max_primitive_instance_count,
+            enable_instancing: options.enable_instancing,
+            temp_vertices: Vec::new(),
         };
 
         // We initially set the flags to default and then now call set_debug_flags
@@ -2692,7 +2701,7 @@ impl Renderer {
         }
     }
 
-    fn draw_instanced_batch<T>(
+    fn draw_instanced_batch<T: Clone>(
         &mut self,
         data: &[T],
         vertex_array_kind: VertexArrayKind,
@@ -2719,10 +2728,27 @@ impl Renderer {
         };
 
         for chunk in data.chunks(chunk_size) {
-            self.device
-                .update_vao_instances(vao, chunk, ONE_TIME_USAGE_HINT);
-            self.device
-                .draw_indexed_triangles_instanced_u16(6, chunk.len() as i32);
+            if self.enable_instancing {
+                self.device
+                    .update_vao_instances(vao, chunk, ONE_TIME_USAGE_HINT);
+                self.device
+                    .draw_indexed_triangles_instanced_u16(6, chunk.len() as i32);
+            } else {
+                self.temp_vertices.resize(chunk.len() * 4 * mem::size_of::<T>(), 0);
+                let temp_slice = unsafe {
+                    std::slice::from_raw_parts_mut(self.temp_vertices.as_mut_ptr() as *mut T, chunk.len() * 4)
+                };
+                for (quad, instance) in temp_slice.chunks_mut(4).zip(chunk) {
+                    quad[0] = instance.clone();
+                    quad[1] = instance.clone();
+                    quad[2] = instance.clone();
+                    quad[3] = instance.clone();
+                }
+                self.device
+                    .update_vao_instances(vao, temp_slice, ONE_TIME_USAGE_HINT);
+                self.device
+                    .draw_indexed_triangles(6 * chunk.len() as i32);
+            }
             self.profile.inc(profiler::DRAW_CALLS);
             stats.total_draw_calls += 1;
         }
@@ -5527,6 +5553,8 @@ pub struct RendererOptions {
     pub panic_on_gl_error: bool,
     pub picture_tile_size: Option<DeviceIntSize>,
     pub texture_cache_config: TextureCacheConfig,
+    /// If true, we'll use instanced vertex attributes. Each instace is a quad.
+    pub enable_instancing: bool,
 }
 
 impl RendererOptions {
@@ -5596,6 +5624,7 @@ impl Default for RendererOptions {
             panic_on_gl_error: false,
             picture_tile_size: None,
             texture_cache_config: TextureCacheConfig::DEFAULT,
+            enable_instancing: false, //TEMP
         }
     }
 }
