@@ -51,7 +51,10 @@ pub use api::DebugFlags;
 use core::time::Duration;
 
 use crate::render_api::{RenderApiSender, DebugCommand, ApiMsg, FrameMsg, MemoryReport};
-use crate::batch::{AlphaBatchContainer, BatchKind, BatchFeatures, BatchTextures, BrushBatchKind, ClipBatchList};
+use crate::batch::{
+    AlphaBatchContainer, BatchKind, BatchFeatures, BatchTextures, BrushBatchKind, ClipBatchList,
+    InstanceList, InstanceListRef,
+};
 #[cfg(any(feature = "capture", feature = "replay"))]
 use crate::capture::{CaptureConfig, ExternalCaptureImage, PlainExternalImage};
 use crate::composite::{CompositeState, CompositeTileSurface, CompositeTile, ResolvedExternalSurface, CompositorSurfaceTransform};
@@ -134,6 +137,9 @@ mod vertex;
 pub use debug::DebugRenderer;
 pub use shade::{Shaders, SharedShaders};
 pub use vertex::{desc, VertexArrayKind, MAX_VERTEX_TEXTURE_WIDTH};
+
+const INDICES_PER_INSTANCE: i32 = 6;
+const VERTICES_PER_INSTANCE: usize = 4;
 
 /// Use this hint for all vertex data re-initialization. This allows
 /// the driver to better re-use RBOs internally.
@@ -734,7 +740,7 @@ pub struct Renderer {
     last_time: u64,
 
     pub gpu_profiler: GpuProfiler,
-    vaos: vertex::RendererVAOs,
+    vertex_hub: vertex::VertexContextHub,
 
     gpu_cache_texture: gpu_cache::GpuCacheTexture,
     vertex_data_textures: Vec<vertex::VertexDataTextures>,
@@ -1033,9 +1039,10 @@ impl Renderer {
 
         let max_primitive_instance_count =
             RendererOptions::MAX_INSTANCE_BUFFER_SIZE / mem::size_of::<PrimitiveInstanceData>();
-        let vaos = vertex::RendererVAOs::new(
+        let vertex_hub = vertex::VertexContextHub::new(
             &mut device,
             if options.enable_instancing { None } else { NonZeroUsize::new(max_primitive_instance_count) },
+            ONE_TIME_USAGE_HINT,
         );
 
         let texture_upload_pbo_pool = UploadPBOPool::new(&mut device, options.upload_pbo_default_size);
@@ -1315,7 +1322,7 @@ impl Renderer {
             clear_caches_with_quads: options.clear_caches_with_quads,
             last_time: 0,
             gpu_profiler,
-            vaos,
+            vertex_hub,
             vertex_data_textures,
             current_vertex_data_textures: 0,
             pipeline_info: PipelineInfo::default(),
@@ -2672,49 +2679,110 @@ impl Renderer {
         }
     }
 
-    fn draw_instanced_batch<T: Clone>(
+    fn draw_instanced_batch<T: Copy>(
         &mut self,
-        data: &[T],
+        list: InstanceListRef<T>,
         vertex_array_kind: VertexArrayKind,
         textures: &BatchTextures,
         stats: &mut RendererStats,
     ) {
         self.bind_textures(textures);
+        let mut context = self.vertex_hub.get(vertex_array_kind);
 
-        // If we end up with an empty draw call here, that means we have
-        // probably introduced unnecessary batch breaks during frame
-        // building - so we should be catching this earlier and removing
-        // the batch.
-        debug_assert!(!data.is_empty());
+        let instance_count = match list {
+            InstanceListRef::Range(ir) => {
+                let _epoch = context.bind(ir.buffer_index, &mut self.device);
+                #[cfg(debug_assertions)]
+                assert_eq!(_epoch, ir.epoch);
+                let count = ir.sub_range.end - ir.sub_range.start;
+                self.device.draw_triangles_u16(
+                    ir.sub_range.start as i32 * INDICES_PER_INSTANCE,
+                    count as i32 * INDICES_PER_INSTANCE,
+                );
+                self.profile.inc(profiler::DRAW_CALLS);
+                count
+            }
+            InstanceListRef::Data(data) => {
+                // If we end up with an empty draw call here, that means we have
+                // probably introduced unnecessary batch breaks during frame
+                // building - so we should be catching this earlier and removing
+                // the batch.
+                debug_assert!(!data.is_empty());
+                context.bind_general(&mut self.device);
 
-        let vao = &self.vaos[vertex_array_kind];
-        self.device.bind_vao(vao);
+                let chunk_size = if self.debug_flags.contains(DebugFlags::DISABLE_BATCHING) {
+                    1
+                } else if vertex_array_kind == VertexArrayKind::Primitive {
+                    self.max_primitive_instance_count
+                } else {
+                    data.len()
+                };
 
-        let chunk_size = if self.debug_flags.contains(DebugFlags::DISABLE_BATCHING) {
-            1
-        } else if vertex_array_kind == VertexArrayKind::Primitive {
-            self.max_primitive_instance_count
-        } else {
-            data.len()
+                for chunk in data.chunks(chunk_size) {
+                    context.upload_instance_data(chunk, &mut self.device);
+                    if self.enable_instancing {
+                        self.device
+                            .draw_indexed_triangles_instanced_u16(INDICES_PER_INSTANCE, chunk.len() as i32);
+                    } else {
+                        self.device
+                            .draw_triangles_u16(0, INDICES_PER_INSTANCE * chunk.len() as i32);
+                    }
+                    self.profile.inc(profiler::DRAW_CALLS);
+                    stats.total_draw_calls += 1;
+                }
+
+                data.len()
+            }
         };
 
-        for chunk in data.chunks(chunk_size) {
-            if self.enable_instancing {
-                self.device
-                    .update_vao_instances(vao, chunk, ONE_TIME_USAGE_HINT, None);
-                self.device
-                    .draw_indexed_triangles_instanced_u16(6, chunk.len() as i32);
-            } else {
-                self.device
-                    .update_vao_instances(vao, chunk, ONE_TIME_USAGE_HINT, NonZeroUsize::new(4));
-                self.device
-                    .draw_indexed_triangles(6 * chunk.len() as i32);
-            }
-            self.profile.inc(profiler::DRAW_CALLS);
-            stats.total_draw_calls += 1;
-        }
+        self.profile.add(profiler::VERTICES, VERTICES_PER_INSTANCE * instance_count);
+    }
 
-        self.profile.add(profiler::VERTICES, 6 * data.len());
+    fn draw_instanced_batch_again<T: Clone>(
+        &mut self,
+        list: InstanceListRef<T>,
+        vertex_array_kind: VertexArrayKind,
+        stats: &mut RendererStats,
+    ) {
+        let instance_count = match list {
+            InstanceListRef::Range(ir) => {
+                let count = ir.sub_range.end - ir.sub_range.start;
+                self.device.draw_triangles_u16(
+                    ir.sub_range.start as i32 * INDICES_PER_INSTANCE,
+                    count as i32 * INDICES_PER_INSTANCE,
+                );
+                self.profile.inc(profiler::DRAW_CALLS);
+                count
+            }
+            InstanceListRef::Data(data) => {
+                let count = if self.debug_flags.contains(DebugFlags::DISABLE_BATCHING) {
+                    1
+                } else if vertex_array_kind == VertexArrayKind::Primitive {
+                    self.max_primitive_instance_count.min(data.len())
+                } else {
+                    data.len()
+                };
+
+                if self.enable_instancing {
+                    self.device
+                        .draw_indexed_triangles_instanced_u16(INDICES_PER_INSTANCE, count as i32);
+                } else {
+                    self.device
+                        .draw_triangles_u16(0, INDICES_PER_INSTANCE * count as i32);
+                }
+
+                self.profile.inc(profiler::DRAW_CALLS);
+                stats.total_draw_calls += 1;
+
+                if count < data.len() {
+                    warn!("Only {}/{} instances are drawn in the repeated pass for {:?}!",
+                        count, data.len(), vertex_array_kind);
+                }
+                count
+            }
+        };
+
+        self.profile.add(profiler::VERTICES, VERTICES_PER_INSTANCE * instance_count);
     }
 
     fn handle_readback_composite(
@@ -2856,7 +2924,7 @@ impl Renderer {
 
     fn handle_scaling(
         &mut self,
-        scalings: &FastHashMap<TextureSource, Vec<ScalingInstance>>,
+        scalings: &FastHashMap<TextureSource, InstanceList<ScalingInstance>>,
         projection: &default::Transform3D<f32>,
         stats: &mut RendererStats,
     ) {
@@ -2866,7 +2934,7 @@ impl Renderer {
 
         let _timer = self.gpu_profiler.start_timer(GPU_TAG_SCALE);
 
-        for (source, instances) in scalings {
+        for (source, list) in scalings {
             let buffer_kind = source.image_buffer_kind();
 
             self.shaders
@@ -2879,7 +2947,7 @@ impl Renderer {
                 );
 
             self.draw_instanced_batch(
-                instances,
+                list.to_ref(),
                 VertexArrayKind::Scale,
                 &BatchTextures::composite_rgb(*source),
                 stats,
@@ -2890,11 +2958,11 @@ impl Renderer {
     fn handle_svg_filters(
         &mut self,
         textures: &BatchTextures,
-        svg_filters: &[SvgFilterInstance],
+        svg_filters: &InstanceList<SvgFilterInstance>,
         projection: &default::Transform3D<f32>,
         stats: &mut RendererStats,
     ) {
-        if svg_filters.is_empty() {
+        if svg_filters.len() == 0 {
             return;
         }
 
@@ -2907,7 +2975,7 @@ impl Renderer {
         );
 
         self.draw_instanced_batch(
-            &svg_filters,
+            svg_filters.to_ref(),
             VertexArrayKind::SvgFilter,
             textures,
             stats,
@@ -2963,7 +3031,7 @@ impl Renderer {
                         &mut self.renderer_errors,
                     );
                     self.draw_instanced_batch(
-                        &[instance],
+                        InstanceListRef::Data(&[instance]),
                         VertexArrayKind::Clear,
                         &BatchTextures::empty(),
                         stats,
@@ -3046,7 +3114,7 @@ impl Renderer {
 
                     let _timer = self.gpu_profiler.start_timer(batch.key.kind.sampler_tag());
                     self.draw_instanced_batch(
-                        &batch.instances,
+                        batch.instances.to_ref(),
                         VertexArrayKind::Primitive,
                         &batch.key.textures,
                         stats
@@ -3151,7 +3219,7 @@ impl Renderer {
                 );
 
                 self.draw_instanced_batch(
-                    &batch.instances,
+                    batch.instances.to_ref(),
                     VertexArrayKind::Primitive,
                     &batch.key.textures,
                     stats
@@ -3171,8 +3239,7 @@ impl Renderer {
                     // are all set up from the previous draw_instanced_batch call,
                     // so just issue a draw call here to avoid re-uploading the
                     // instances and re-binding textures etc.
-                    self.device
-                        .draw_indexed_triangles_instanced_u16(6, batch.instances.len() as i32);
+                    self.draw_instanced_batch_again(batch.instances.to_ref(), VertexArrayKind::Primitive, stats);
 
                     self.set_blend_mode_subpixel_with_bg_color_pass2(framebuffer_kind);
                     // re-binding the shader after the blend mode change
@@ -3183,8 +3250,7 @@ impl Renderer {
                     );
                     self.device.switch_mode(ShaderColorMode::SubpixelWithBgColorPass2 as _);
 
-                    self.device
-                        .draw_indexed_triangles_instanced_u16(6, batch.instances.len() as i32);
+                    self.draw_instanced_batch_again(batch.instances.to_ref(), VertexArrayKind::Primitive, stats);
                 }
 
                 if batch.key.blend_mode == BlendMode::SubpixelWithBgColor {
@@ -3344,7 +3410,7 @@ impl Renderer {
             };
 
             self.draw_instanced_batch(
-                &[instance],
+                InstanceListRef::Data(&[instance]),
                 VertexArrayKind::Composite,
                 &textures,
                 &mut results.stats,
@@ -3529,7 +3595,7 @@ impl Renderer {
             if flush_batch {
                 if !instances.is_empty() {
                     self.draw_instanced_batch(
-                        &instances,
+                        InstanceListRef::Data(&instances),
                         VertexArrayKind::Composite,
                         &current_textures,
                         stats,
@@ -3560,7 +3626,7 @@ impl Renderer {
         // Flush the last batch
         if !instances.is_empty() {
             self.draw_instanced_batch(
-                &instances,
+                InstanceListRef::Data(&instances),
                 VertexArrayKind::Composite,
                 &current_textures,
                 stats,
@@ -3814,16 +3880,16 @@ impl Renderer {
 
     fn draw_blurs(
         &mut self,
-        blurs: &FastHashMap<TextureSource, Vec<BlurInstance>>,
+        blurs: &FastHashMap<TextureSource, InstanceList<BlurInstance>>,
         stats: &mut RendererStats,
     ) {
-        for (texture, blurs) in blurs {
+        for (texture, list) in blurs {
             let textures = BatchTextures::composite_rgb(
                 *texture,
             );
 
             self.draw_instanced_batch(
-                blurs,
+                list.to_ref(),
                 VertexArrayKind::Blur,
                 &textures,
                 stats,
@@ -3843,7 +3909,7 @@ impl Renderer {
         }
 
         // draw rounded cornered rectangles
-        if !list.slow_rectangles.is_empty() {
+        if !list.slow_rectangles.data.is_empty() {
             let _gm2 = self.gpu_profiler.start_marker("slow clip rectangles");
             self.shaders.borrow_mut().cs_clip_rectangle_slow.bind(
                 &mut self.device,
@@ -3851,13 +3917,13 @@ impl Renderer {
                 &mut self.renderer_errors,
             );
             self.draw_instanced_batch(
-                &list.slow_rectangles,
+                list.slow_rectangles.to_ref(),
                 VertexArrayKind::ClipRect,
                 &BatchTextures::empty(),
                 stats,
             );
         }
-        if !list.fast_rectangles.is_empty() {
+        if !list.fast_rectangles.data.is_empty() {
             let _gm2 = self.gpu_profiler.start_marker("fast clip rectangles");
             self.shaders.borrow_mut().cs_clip_rectangle_fast.bind(
                 &mut self.device,
@@ -3865,7 +3931,7 @@ impl Renderer {
                 &mut self.renderer_errors,
             );
             self.draw_instanced_batch(
-                &list.fast_rectangles,
+                list.fast_rectangles.to_ref(),
                 VertexArrayKind::ClipRect,
                 &BatchTextures::empty(),
                 stats,
@@ -3879,7 +3945,7 @@ impl Renderer {
             self.shaders.borrow_mut().cs_clip_box_shadow
                 .bind(&mut self.device, projection, &mut self.renderer_errors);
             self.draw_instanced_batch(
-                items,
+                items.to_ref(),
                 VertexArrayKind::ClipBoxShadow,
                 &textures,
                 stats,
@@ -3893,7 +3959,7 @@ impl Renderer {
             self.shaders.borrow_mut().cs_clip_image
                 .bind(&mut self.device, projection, &mut self.renderer_errors);
             self.draw_instanced_batch(
-                items,
+                items.to_ref(),
                 VertexArrayKind::ClipImage,
                 &textures,
                 stats,
@@ -4072,7 +4138,7 @@ impl Renderer {
                     &mut self.renderer_errors,
                 );
                 self.draw_instanced_batch(
-                    &instances,
+                    InstanceListRef::Data(&instances),
                     VertexArrayKind::Clear,
                     &BatchTextures::empty(),
                     stats,
@@ -4096,15 +4162,15 @@ impl Renderer {
         }
 
         // Draw any borders for this target.
-        if !target.border_segments_solid.is_empty() ||
-           !target.border_segments_complex.is_empty()
+        if !target.border_segments_solid.data.is_empty() ||
+           !target.border_segments_complex.data.is_empty()
         {
             let _timer = self.gpu_profiler.start_timer(GPU_TAG_CACHE_BORDER);
 
             self.set_blend(true, FramebufferKind::Other);
             self.set_blend_mode_premultiplied_alpha(FramebufferKind::Other);
 
-            if !target.border_segments_solid.is_empty() {
+            if !target.border_segments_solid.data.is_empty() {
                 self.shaders.borrow_mut().cs_border_solid.bind(
                     &mut self.device,
                     &projection,
@@ -4112,14 +4178,14 @@ impl Renderer {
                 );
 
                 self.draw_instanced_batch(
-                    &target.border_segments_solid,
+                    target.border_segments_solid.to_ref(),
                     VertexArrayKind::Border,
                     &BatchTextures::empty(),
                     stats,
                 );
             }
 
-            if !target.border_segments_complex.is_empty() {
+            if !target.border_segments_complex.data.is_empty() {
                 self.shaders.borrow_mut().cs_border_segment.bind(
                     &mut self.device,
                     &projection,
@@ -4127,7 +4193,7 @@ impl Renderer {
                 );
 
                 self.draw_instanced_batch(
-                    &target.border_segments_complex,
+                    target.border_segments_complex.to_ref(),
                     VertexArrayKind::Border,
                     &BatchTextures::empty(),
                     stats,
@@ -4151,7 +4217,7 @@ impl Renderer {
             );
 
             self.draw_instanced_batch(
-                &target.line_decorations,
+                InstanceListRef::Data(&target.line_decorations),
                 VertexArrayKind::LineDecoration,
                 &BatchTextures::empty(),
                 stats,
@@ -4173,7 +4239,7 @@ impl Renderer {
             );
 
             self.draw_instanced_batch(
-                &target.gradients,
+                InstanceListRef::Data(&target.gradients),
                 VertexArrayKind::Gradient,
                 &BatchTextures::empty(),
                 stats,
@@ -4549,6 +4615,65 @@ impl Renderer {
                 &results.dirty_rects,
                 &mut **compositor,
             );
+        }
+
+        if !self.enable_instancing && !frame.has_been_rendered {
+            use std::iter;
+            profile_scope!("instance population");
+
+            let dev = &mut self.device;
+            dev.unbind_vao();
+            let hub = &mut self.vertex_hub;
+            hub.reset_instance_pools();
+
+            for pass in frame.passes.iter_mut() {
+                for target in pass.texture_cache.values_mut() {
+                    hub.blur.bake_instances(dev, target.horizontal_blurs.values_mut());
+                    hub.border.bake_instances(dev,
+                        iter::once(&mut target.border_segments_complex)
+                            .chain(iter::once(&mut target.border_segments_solid))
+                    );
+                }
+                for target in pass.picture_cache.iter_mut() {
+                    let abc = &mut target.alpha_batch_container;
+                    hub.prim.bake_instances(dev,
+                        abc.opaque_batches.iter_mut().map(|b| &mut b.instances)
+                    );
+                    hub.prim.bake_instances(dev,
+                        abc.alpha_batches.iter_mut().map(|b| &mut b.instances)
+                    );
+                }
+
+                for target in pass.alpha.targets.iter_mut() {
+                    hub.blur.bake_instances(dev, target.horizontal_blurs.values_mut());
+                    hub.blur.bake_instances(dev, target.vertical_blurs.values_mut());
+                    hub.scale.bake_instances(dev, target.scalings.values_mut());
+                    for clips in iter::once(&mut target.clip_batcher.primary_clips).chain(iter::once(&mut target.clip_batcher.secondary_clips)) {
+                        hub.clip_rect.bake_instances(dev,
+                            iter::once(&mut clips.slow_rectangles)
+                                .chain(iter::once(&mut clips.fast_rectangles))
+                        );
+                        hub.clip_image.bake_instances(dev, clips.images.values_mut());
+                        hub.clip_box_shadow.bake_instances(dev, clips.box_shadows.values_mut());
+                    }
+                }
+                for target in pass.color.targets.iter_mut() {
+                    hub.blur.bake_instances(dev, target.horizontal_blurs.values_mut());
+                    hub.blur.bake_instances(dev, target.vertical_blurs.values_mut());
+                    hub.scale.bake_instances(dev, target.scalings.values_mut());
+                    hub.svg_filter.bake_instances(dev, target.svg_filters.iter_mut().map(|&mut(_, ref mut list)| list));
+                    for abc in target.alpha_batch_containers.iter_mut() {
+                        hub.prim.bake_instances(dev,
+                            abc.opaque_batches.iter_mut().map(|b| &mut b.instances)
+                        );
+                        hub.prim.bake_instances(dev,
+                            abc.alpha_batches.iter_mut().map(|b| &mut b.instances)
+                        );
+                    }
+                }
+            }
+
+            hub.finish_populating_instances(dev);
         }
 
         for (_pass_index, pass) in frame.passes.iter_mut().enumerate() {
@@ -5260,7 +5385,7 @@ impl Renderer {
         }
         self.texture_upload_pbo_pool.deinit(&mut self.device);
         self.texture_resolver.deinit(&mut self.device);
-        self.vaos.deinit(&mut self.device);
+        self.vertex_hub.deinit(&mut self.device);
         self.debug.deinit(&mut self.device);
 
         if let Ok(shaders) = Rc::try_unwrap(self.shaders) {
@@ -5589,7 +5714,7 @@ impl Default for RendererOptions {
             texture_cache_config: TextureCacheConfig::DEFAULT,
             // Disabling instancing means more vertex data to upload and potentially
             // process by the vertex shaders.
-            enable_instancing: true,
+            enable_instancing: false, //TEMP
         }
     }
 }

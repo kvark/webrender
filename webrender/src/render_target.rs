@@ -2,11 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-
 use api::units::*;
 use api::{ColorF, PremultipliedColorF, ImageFormat, LineOrientation, BorderStyle};
 use crate::batch::{AlphaBatchBuilder, AlphaBatchContainer, BatchTextures, resolve_image};
-use crate::batch::{ClipBatcher, BatchBuilder};
+use crate::batch::{ClipBatcher, BatchBuilder, InstanceList};
 use crate::spatial_tree::{SpatialTree, ROOT_SPATIAL_NODE_INDEX};
 use crate::clip::ClipStore;
 use crate::composite::CompositeState;
@@ -198,7 +197,6 @@ impl<T: RenderTarget> RenderTargetList<T> {
     }
 }
 
-
 /// Contains the work (in the form of instance arrays) needed to fill a color
 /// color output surface (RGBA8).
 ///
@@ -208,10 +206,10 @@ impl<T: RenderTarget> RenderTargetList<T> {
 pub struct ColorRenderTarget {
     pub alpha_batch_containers: Vec<AlphaBatchContainer>,
     // List of blur operations to apply for this render target.
-    pub vertical_blurs: FastHashMap<TextureSource, Vec<BlurInstance>>,
-    pub horizontal_blurs: FastHashMap<TextureSource, Vec<BlurInstance>>,
-    pub scalings: FastHashMap<TextureSource, Vec<ScalingInstance>>,
-    pub svg_filters: Vec<(BatchTextures, Vec<SvgFilterInstance>)>,
+    pub vertical_blurs: FastHashMap<TextureSource, InstanceList<BlurInstance>>,
+    pub horizontal_blurs: FastHashMap<TextureSource, InstanceList<BlurInstance>>,
+    pub scalings: FastHashMap<TextureSource, InstanceList<ScalingInstance>>,
+    pub svg_filters: Vec<(BatchTextures, InstanceList<SvgFilterInstance>)>,
     pub blits: Vec<BlitJob>,
     alpha_tasks: Vec<RenderTaskId>,
     screen_size: DeviceIntSize,
@@ -485,9 +483,9 @@ impl RenderTarget for ColorRenderTarget {
 pub struct AlphaRenderTarget {
     pub clip_batcher: ClipBatcher,
     // List of blur operations to apply for this render target.
-    pub vertical_blurs: FastHashMap<TextureSource, Vec<BlurInstance>>,
-    pub horizontal_blurs: FastHashMap<TextureSource, Vec<BlurInstance>>,
-    pub scalings: FastHashMap<TextureSource, Vec<ScalingInstance>>,
+    pub vertical_blurs: FastHashMap<TextureSource, InstanceList<BlurInstance>>,
+    pub horizontal_blurs: FastHashMap<TextureSource, InstanceList<BlurInstance>>,
+    pub scalings: FastHashMap<TextureSource, InstanceList<ScalingInstance>>,
     pub zero_clears: Vec<RenderTaskId>,
     pub one_clears: Vec<RenderTaskId>,
     pub texture_id: CacheTextureId,
@@ -631,10 +629,10 @@ pub struct PictureCacheTarget {
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 pub struct TextureCacheRenderTarget {
     pub target_kind: RenderTargetKind,
-    pub horizontal_blurs: FastHashMap<TextureSource, Vec<BlurInstance>>,
+    pub horizontal_blurs: FastHashMap<TextureSource, InstanceList<BlurInstance>>,
     pub blits: Vec<BlitJob>,
-    pub border_segments_complex: Vec<BorderInstance>,
-    pub border_segments_solid: Vec<BorderInstance>,
+    pub border_segments_complex: InstanceList<BorderInstance>,
+    pub border_segments_solid: InstanceList<BorderInstance>,
     pub clears: Vec<DeviceIntRect>,
     pub line_decorations: Vec<LineDecorationJob>,
     pub gradients: Vec<GradientJob>,
@@ -646,8 +644,8 @@ impl TextureCacheRenderTarget {
             target_kind,
             horizontal_blurs: FastHashMap::default(),
             blits: vec![],
-            border_segments_complex: vec![],
-            border_segments_solid: vec![],
+            border_segments_complex: InstanceList::default(),
+            border_segments_solid: InstanceList::default(),
             clears: vec![],
             line_decorations: vec![],
             gradients: vec![],
@@ -720,9 +718,9 @@ impl TextureCacheRenderTarget {
                     //           the render task data instead of per instance.
                     instance.task_origin = task_origin;
                     if instance.flags & STYLE_MASK == STYLE_SOLID {
-                        self.border_segments_solid.push(instance);
+                        self.border_segments_solid.data.push(instance);
                     } else {
-                        self.border_segments_complex.push(instance);
+                        self.border_segments_complex.data.push(instance);
                     }
                 }
             }
@@ -764,7 +762,7 @@ impl TextureCacheRenderTarget {
 }
 
 fn add_blur_instances(
-    instances: &mut FastHashMap<TextureSource, Vec<BlurInstance>>,
+    instances: &mut FastHashMap<TextureSource, InstanceList<BlurInstance>>,
     blur_direction: BlurDirection,
     task_address: RenderTaskAddress,
     src_task_id: RenderTaskId,
@@ -783,13 +781,14 @@ fn add_blur_instances(
 
     instances
         .entry(source)
-        .or_insert(Vec::new())
+        .or_default()
+        .data
         .push(instance);
 }
 
 fn add_scaling_instances(
     task: &ScalingTask,
-    instances: &mut FastHashMap<TextureSource, Vec<ScalingInstance>>,
+    instances: &mut FastHashMap<TextureSource, InstanceList<ScalingInstance>>,
     target_task: &RenderTask,
     source_task: Option<&RenderTask>,
     resource_cache: &ResourceCache,
@@ -844,7 +843,8 @@ fn add_scaling_instances(
 
     instances
         .entry(source)
-        .or_insert(Vec::new())
+        .or_default()
+        .data
         .push(ScalingInstance {
             target_rect,
             source_rect,
@@ -853,7 +853,7 @@ fn add_scaling_instances(
 }
 
 fn add_svg_filter_instances(
-    instances: &mut Vec<(BatchTextures, Vec<SvgFilterInstance>)>,
+    instances: &mut Vec<(BatchTextures, InstanceList<SvgFilterInstance>)>,
     render_tasks: &RenderTaskGraph,
     filter: &SvgFilterInfo,
     task_id: RenderTaskId,
@@ -941,16 +941,18 @@ fn add_svg_filter_instances(
         extra_data_address: extra_data_address.unwrap_or(GpuCacheAddress::INVALID),
     };
 
-    for (ref mut batch_textures, ref mut batch) in instances.iter_mut() {
+    for (ref mut batch_textures, ref mut list) in instances.iter_mut() {
         if let Some(combined_textures) = batch_textures.combine_textures(textures) {
-            batch.push(instance);
+            list.data.push(instance);
             // Update the batch textures to the newly combined batch textures
             *batch_textures = combined_textures;
             return;
         }
     }
 
-    instances.push((textures, vec![instance]));
+    let mut list = InstanceList::default();
+    list.data.push(instance);
+    instances.push((textures, list));
 }
 
 // Defines where the source data for a blit job can be found.
@@ -971,7 +973,7 @@ pub struct BlitJob {
 
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct LineDecorationJob {
     pub task_rect: DeviceRect,
     pub local_size: LayoutSize,
@@ -983,7 +985,7 @@ pub struct LineDecorationJob {
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 #[repr(C)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct GradientJob {
     pub task_rect: DeviceRect,
     pub stops: [f32; GRADIENT_FP_STOPS],

@@ -24,7 +24,7 @@ use crate::prim_store::{VisibleGradientTile, PrimitiveInstance, PrimitiveOpacity
 use crate::prim_store::{BrushSegment, ClipMaskKind, ClipTaskIndex};
 use crate::prim_store::VECS_PER_SEGMENT;
 use crate::prim_store::image::ImageSource;
-use crate::render_target::RenderTargetContext;
+use crate::render_target::{RenderTargetContext};
 use crate::render_task_graph::{RenderTaskId, RenderTaskGraph};
 use crate::render_task::RenderTaskAddress;
 use crate::renderer::{BlendMode, ShaderColorMode};
@@ -32,10 +32,10 @@ use crate::renderer::{BLOCKS_PER_UV_RECT, MAX_VERTEX_TEXTURE_WIDTH};
 use crate::resource_cache::{CacheItem, GlyphFetchResult, ImageProperties, ImageRequest, ResourceCache};
 use crate::space::SpaceMapper;
 use crate::visibility::{PrimitiveVisibilityMask, PrimitiveVisibility, PrimitiveVisibilityFlags, VisibilityState};
-use smallvec::SmallVec;
-use std::{f32, i32, usize};
 use crate::util::{project_rect, MaxRect, TransformedRectKind};
 use crate::segment::EdgeAaSegmentMask;
+use smallvec::SmallVec;
+use std::{f32, i32, usize, ops::Range};
 
 // Special sentinel value recognized by the shader. It is considered to be
 // a dummy task that doesn't mask out anything.
@@ -137,7 +137,7 @@ pub struct BatchTextures {
 
 impl BatchTextures {
     /// An empty batch textures (no binding slots set)
-    pub fn empty() -> BatchTextures {
+    pub fn empty() -> Self {
         BatchTextures {
             input: TextureSet::UNTEXTURED,
             clip_mask: TextureSource::Invalid,
@@ -148,7 +148,7 @@ impl BatchTextures {
     pub fn prim_textured(
         color: TextureSource,
         clip_mask: TextureSource,
-    ) -> BatchTextures {
+    ) -> Self {
         BatchTextures {
             input: TextureSet::prim_textured(color),
             clip_mask,
@@ -158,7 +158,7 @@ impl BatchTextures {
     /// An untextured primitive with optional clip mask
     pub fn prim_untextured(
         clip_mask: TextureSource,
-    ) -> BatchTextures {
+    ) -> Self {
         BatchTextures {
             input: TextureSet::UNTEXTURED,
             clip_mask,
@@ -168,7 +168,7 @@ impl BatchTextures {
     /// A composite style effect with single input texture
     pub fn composite_rgb(
         texture: TextureSource,
-    ) -> BatchTextures {
+    ) -> Self {
         BatchTextures {
             input: TextureSet {
                 colors: [
@@ -186,7 +186,7 @@ impl BatchTextures {
         color0: TextureSource,
         color1: TextureSource,
         color2: TextureSource,
-    ) -> BatchTextures {
+    ) -> Self {
         BatchTextures {
             input: TextureSet {
                 colors: [color0, color1, color2],
@@ -195,7 +195,7 @@ impl BatchTextures {
         }
     }
 
-    pub fn is_compatible_with(&self, other: &BatchTextures) -> bool {
+    pub fn is_compatible_with(&self, other: &Self) -> bool {
         if !self.clip_mask.is_compatible(&other.clip_mask) {
             return false;
         }
@@ -203,7 +203,7 @@ impl BatchTextures {
         self.input.is_compatible_with(&other.input)
     }
 
-    pub fn combine_textures(&self, other: BatchTextures) -> Option<BatchTextures> {
+    pub fn combine_textures(&self, other: Self) -> Option<Self> {
         if !self.is_compatible_with(&other) {
             return None;
         }
@@ -219,7 +219,7 @@ impl BatchTextures {
         Some(new_textures)
     }
 
-    fn merge(&mut self, other: &BatchTextures) {
+    fn merge(&mut self, other: &Self) {
         self.clip_mask = self.clip_mask.combine(other.clip_mask);
 
         for (s, o) in self.input.colors.iter_mut().zip(other.input.colors.iter()) {
@@ -304,6 +304,69 @@ impl BatchRects {
     }
 }
 
+/// A typedef for the instance buffer index.
+//Note: having `u16` allows us to not hit a collision with `u32` or `usize` accidentally.
+pub type InstanceBufferIndex = u16;
+
+#[derive(Debug)]
+#[cfg_attr(feature = "capture", derive(Serialize))]
+#[cfg_attr(feature = "replay", derive(Deserialize))]
+pub struct InstanceRange {
+    /// Index of an instance buffer within a list that belongs to this
+    /// type of a batch, which is implicit here.
+    pub buffer_index: InstanceBufferIndex,
+    /// Range or instances to draw.
+    pub sub_range: Range<usize>,
+    #[cfg(debug_assertions)]
+    pub epoch: usize,
+}
+
+//TODO: make this an `enum`. Currently it's rather inconvenient.
+/// Structure representing a contiguous list of instances
+/// that are drawn after each other.
+#[derive(Debug)]
+#[cfg_attr(feature = "capture", derive(Serialize))]
+#[cfg_attr(feature = "replay", derive(Deserialize))]
+pub struct InstanceList<T> {
+    /// Vector of raw data on CPU.
+    pub data: Vec<T>,
+    pub range: Option<InstanceRange>,
+}
+
+pub enum InstanceListRef<'a, T> {
+    Data(&'a [T]),
+    Range(&'a InstanceRange),
+}
+
+impl<T> Default for InstanceList<T> {
+    fn default() -> Self {
+        InstanceList {
+            data: Vec::new(),
+            range: None,
+        }
+    }
+}
+
+impl<T> InstanceList<T> {
+    fn extend(&mut self, other: Self) {
+        assert!(self.range.is_none(), "Unable to extend the data that's already in GPU");
+        self.data.extend(other.data);
+    }
+
+    pub fn len(&self) -> usize {
+        match self.range {
+            Some(ref r) => r.sub_range.end - r.sub_range.start,
+            None => self.data.len(),
+        }
+    }
+
+    pub fn to_ref(&self) -> InstanceListRef<T> {
+        match self.range {
+            Some(ref ir) => InstanceListRef::Range(ir),
+            None => InstanceListRef::Data(&self.data),
+        }
+    }
+}
 
 pub struct AlphaBatchList {
     pub batches: Vec<PrimitiveBatch>,
@@ -400,7 +463,7 @@ impl AlphaBatchList {
                     _ => 16,
                 };
                 let mut new_batch = PrimitiveBatch::new(key);
-                new_batch.instances.reserve(prealloc);
+                new_batch.instances.data.reserve(prealloc);
                 selected_batch_index = Some(self.batches.len());
                 self.batches.push(new_batch);
                 self.batch_rects.push(BatchRects::new());
@@ -415,7 +478,7 @@ impl AlphaBatchList {
         batch.features |= features;
         batch.key.textures.merge(&key.textures);
 
-        &mut batch.instances
+        &mut batch.instances.data
     }
 }
 
@@ -491,7 +554,7 @@ impl OpaqueBatchList {
         batch.features |= features;
         batch.key.textures.merge(&key.textures);
 
-        &mut batch.instances
+        &mut batch.instances.data
     }
 
     fn finalize(&mut self) {
@@ -502,7 +565,7 @@ impl OpaqueBatchList {
         //           build these in reverse and avoid having
         //           to reverse the instance array here.
         for batch in &mut self.batches {
-            batch.instances.reverse();
+            batch.instances.data.reverse();
         }
     }
 }
@@ -511,7 +574,7 @@ impl OpaqueBatchList {
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 pub struct PrimitiveBatch {
     pub key: BatchKey,
-    pub instances: Vec<PrimitiveInstanceData>,
+    pub instances: InstanceList<PrimitiveInstanceData>,
     pub features: BatchFeatures,
 }
 
@@ -537,12 +600,12 @@ impl PrimitiveBatch {
     fn new(key: BatchKey) -> PrimitiveBatch {
         PrimitiveBatch {
             key,
-            instances: Vec::new(),
+            instances: InstanceList::default(),
             features: BatchFeatures::empty(),
         }
     }
 
-    fn merge(&mut self, other: PrimitiveBatch) {
+    fn merge(&mut self, other: Self) {
         self.instances.extend(other.instances);
         self.features |= other.features;
         self.key.textures.merge(&other.key.textures);
@@ -3415,18 +3478,18 @@ pub fn resolve_image(
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 pub struct ClipBatchList {
     /// Rectangle draws fill up the rectangles with rounded corners.
-    pub slow_rectangles: Vec<ClipMaskInstanceRect>,
-    pub fast_rectangles: Vec<ClipMaskInstanceRect>,
+    pub slow_rectangles: InstanceList<ClipMaskInstanceRect>,
+    pub fast_rectangles: InstanceList<ClipMaskInstanceRect>,
     /// Image draws apply the image masking.
-    pub images: FastHashMap<TextureSource, Vec<ClipMaskInstanceImage>>,
-    pub box_shadows: FastHashMap<TextureSource, Vec<ClipMaskInstanceBoxShadow>>,
+    pub images: FastHashMap<TextureSource, InstanceList<ClipMaskInstanceImage>>,
+    pub box_shadows: FastHashMap<TextureSource, InstanceList<ClipMaskInstanceBoxShadow>>,
 }
 
 impl ClipBatchList {
     fn new() -> Self {
         ClipBatchList {
-            slow_rectangles: Vec::new(),
-            fast_rectangles: Vec::new(),
+            slow_rectangles: InstanceList::default(),
+            fast_rectangles: InstanceList::default(),
             images: FastHashMap::default(),
             box_shadows: FastHashMap::default(),
         }
@@ -3482,7 +3545,7 @@ impl ClipBatcher {
             clip_data,
         };
 
-        self.primary_clips.slow_rectangles.push(instance);
+        self.primary_clips.slow_rectangles.data.push(instance);
     }
 
     /// Where appropriate, draw a clip rectangle as a small series of tiles,
@@ -3563,7 +3626,7 @@ impl ClipBatcher {
                 // these pixels would be redundant - since this clip can't possibly
                 // affect the pixels in this tile, skip them!
                 if !world_device_rect.contains_rect(&world_sub_rect) {
-                    clip_list.slow_rectangles.push(ClipMaskInstanceRect {
+                    clip_list.slow_rectangles.data.push(ClipMaskInstanceRect {
                         common: ClipMaskInstanceCommon {
                             sub_rect: normalized_sub_rect,
                             ..*common
@@ -3658,7 +3721,8 @@ impl ClipBatcher {
                         self.get_batch_list(is_first_clip)
                             .images
                             .entry(cache_item.texture_id)
-                            .or_insert_with(Vec::new)
+                            .or_default()
+                            .data
                             .push(ClipMaskInstanceImage {
                                 common: ClipMaskInstanceCommon {
                                     sub_rect,
@@ -3727,7 +3791,8 @@ impl ClipBatcher {
                     self.get_batch_list(is_first_clip)
                         .box_shadows
                         .entry(cache_item.texture_id)
-                        .or_insert_with(Vec::new)
+                        .or_default()
+                        .data
                         .push(ClipMaskInstanceBoxShadow {
                             common,
                             resource_address: gpu_cache.get_address(&cache_item.uv_rect_handle),
@@ -3745,7 +3810,7 @@ impl ClipBatcher {
                 ClipItemKind::Rectangle { rect, mode: ClipMode::ClipOut } => {
                     self.get_batch_list(is_first_clip)
                         .slow_rectangles
-                        .push(ClipMaskInstanceRect {
+                        .data.push(ClipMaskInstanceRect {
                             common,
                             local_pos: rect.origin,
                             clip_data: ClipData::uniform(rect.size, 0.0, ClipMode::ClipOut),
@@ -3769,6 +3834,7 @@ impl ClipBatcher {
                         ) {
                             self.get_batch_list(is_first_clip)
                                 .slow_rectangles
+                                .data
                                 .push(ClipMaskInstanceRect {
                                     common,
                                     local_pos: rect.origin,
@@ -3787,9 +3853,9 @@ impl ClipBatcher {
                         clip_data: ClipData::rounded_rect(rect.size, radius, mode),
                     };
                     if clip_instance.flags.contains(ClipNodeFlags::USE_FAST_PATH) {
-                        batch_list.fast_rectangles.push(instance);
+                        batch_list.fast_rectangles.data.push(instance);
                     } else {
-                        batch_list.slow_rectangles.push(instance);
+                        batch_list.slow_rectangles.data.push(instance);
                     }
 
                     true

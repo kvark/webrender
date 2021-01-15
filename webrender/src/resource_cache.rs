@@ -1205,6 +1205,7 @@ impl ResourceCache {
         self.cached_glyphs.begin_frame(
             stamp,
             &mut self.texture_cache,
+            &self.cached_render_tasks,
             &mut self.glyph_rasterizer,
         );
         self.cached_render_tasks.begin_frame(&mut self.texture_cache);

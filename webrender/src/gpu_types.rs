@@ -83,7 +83,7 @@ pub enum BlurDirection {
     Vertical,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 #[repr(C)]
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
@@ -93,7 +93,7 @@ pub struct BlurInstance {
     pub blur_direction: BlurDirection,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 #[repr(C)]
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
@@ -103,7 +103,7 @@ pub struct ScalingInstance {
     pub source_layer: i32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 #[repr(C)]
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
@@ -132,7 +132,7 @@ pub enum BorderSegment {
     Bottom,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Copy, Debug)]
 #[repr(C)]
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
@@ -160,7 +160,7 @@ pub struct ClipMaskInstanceCommon {
     pub prim_transform_id: TransformPaletteId,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 #[repr(C)]
@@ -171,7 +171,7 @@ pub struct ClipMaskInstanceImage {
     pub local_rect: LayoutRect,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 #[repr(C)]
@@ -181,7 +181,7 @@ pub struct ClipMaskInstanceRect {
     pub clip_data: ClipData,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 #[repr(C)]
@@ -193,7 +193,7 @@ pub struct BoxShadowData {
     pub dest_rect: LayoutRect,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 #[repr(C)]
@@ -206,7 +206,7 @@ pub struct ClipMaskInstanceBoxShadow {
 /// A clipping primitive drawn into the clipping mask.
 /// Could be an image or a rectangle, which defines the
 /// way `address` is treated.
-#[derive(Debug, Copy, Clone)]
+#[derive(Clone, Copy, Debug)]
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 #[repr(C)]
@@ -224,7 +224,7 @@ pub struct ClipMaskInstance {
 }
 
 // 16 bytes per instance should be enough for anyone!
-#[derive(Debug, Clone)]
+#[derive(Clone, Copy, Debug)]
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
 pub struct PrimitiveInstanceData {
@@ -234,7 +234,7 @@ pub struct PrimitiveInstanceData {
 /// Vertex format for picture cache composite shader.
 /// When editing the members, update desc::COMPOSITE
 /// so its list of instance_attributes matches:
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct CompositeInstance {
     // Device space rectangle of surface
@@ -326,7 +326,7 @@ impl CompositeInstance {
 }
 
 /// Vertex format for issuing colored quads.
-#[derive(Debug, Clone)]
+#[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct ClearInstance {
     pub rect: [f32; 4],

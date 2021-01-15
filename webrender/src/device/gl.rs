@@ -318,7 +318,7 @@ impl VertexDescriptor {
 }
 
 impl VBOId {
-    fn bind(&self, gl: &dyn gl::Gl) {
+    pub fn bind(&self, gl: &dyn gl::Gl) {
         gl.bind_buffer(gl::ARRAY_BUFFER, self.0);
     }
 }
@@ -597,9 +597,9 @@ pub struct VAO {
     id: gl::GLuint,
     ibo_id: IBOId,
     main_vbo_id: VBOId,
-    instance_vbo_id: VBOId,
-    instance_stride: usize,
-    instance_divisor: u32,
+    pub instance_vbo_id: VBOId,
+    pub instance_stride: usize,
+    pub instance_divisor: u32,
     owns_vertices_and_indices: bool,
 }
 
@@ -1588,25 +1588,19 @@ impl Device {
              //  && renderer_name.starts_with("AMD");
              //  (XXX: we apply this restriction to all GPUs to handle switching)
 
-        let is_angle = renderer_name.starts_with("ANGLE");
-
         // On certain GPUs PBO texture upload is only performed asynchronously
         // if the stride of the data is a multiple of a certain value.
+        // On Adreno it must be a multiple of 64 pixels, meaning value in bytes
+        // varies with the texture format.
+        // On AMD Mac, it must always be a multiple of 256 bytes.
+        // Other platforms may have similar requirements and should be added
+        // here.
+        // The default value should be 4 bytes.
         let optimal_pbo_stride = if is_adreno {
-            // On Adreno it must be a multiple of 64 pixels, meaning value in bytes
-            // varies with the texture format.
             StrideAlignment::Pixels(NonZeroUsize::new(64).unwrap())
         } else if is_macos {
-            // On AMD Mac, it must always be a multiple of 256 bytes.
-            // We apply this restriction to all GPUs to handle switching
             StrideAlignment::Bytes(NonZeroUsize::new(256).unwrap())
-        } else if is_angle {
-            // On ANGLE, PBO texture uploads get incorrectly truncated if
-            // the stride is greater than the width * bpp.
-            StrideAlignment::Bytes(NonZeroUsize::new(1).unwrap())
         } else {
-            // Other platforms may have similar requirements and should be added
-            // here. The default value should be 4 bytes.
             StrideAlignment::Bytes(NonZeroUsize::new(4).unwrap())
         };
 
@@ -2954,6 +2948,11 @@ impl Device {
         pbo
     }
 
+    pub fn create_vbo_raw(&mut self) -> VBOId {
+        let id = self.gl.gen_buffers(1)[0];
+        VBOId(id)
+    }
+
     pub fn read_pixels_into_pbo(
         &mut self,
         read_target: ReadTarget,
@@ -3204,6 +3203,10 @@ impl Device {
         self.bind_vao_impl(vao.id)
     }
 
+    pub fn unbind_vao(&mut self) {
+        self.bind_vao_impl(0);
+    }
+
     fn create_vao_with_vbos(
         &mut self,
         descriptor: &VertexDescriptor,
@@ -3263,6 +3266,21 @@ impl Device {
         vao.id = 0;
     }
 
+    pub fn switch_instance_buffer(
+        &mut self,
+        buffer: VBOId,
+        descriptor: &VertexDescriptor,
+        divisor: u32,
+    ) {
+        VertexDescriptor::bind_attributes(
+            &descriptor.instance_attributes,
+            descriptor.vertex_attributes.len(),
+            divisor,
+            self.gl(),
+            buffer,
+        );
+    }
+
     pub fn create_vbo<T>(&mut self) -> VBO<T> {
         let ids = self.gl.gen_buffers(1);
         VBO {
@@ -3276,6 +3294,10 @@ impl Device {
     pub fn delete_vbo<T>(&mut self, mut vbo: VBO<T>) {
         self.gl.delete_buffers(&[vbo.id]);
         vbo.id = 0;
+    }
+
+    pub fn delete_vbo_raw(&mut self, vbo_id: VBOId) {
+        self.gl.delete_buffers(&[vbo_id.0]);
     }
 
     pub fn create_vao(&mut self, descriptor: &VertexDescriptor, instance_divisor: u32) -> VAO {
@@ -3338,7 +3360,7 @@ impl Device {
         );
     }
 
-    fn update_vbo_data<V>(
+    pub fn update_vbo_data<V>(
         &mut self,
         vbo: VBOId,
         vertices: &[V],
@@ -3380,54 +3402,29 @@ impl Device {
         self.update_vbo_data(vao.main_vbo_id, vertices, usage_hint)
     }
 
-    pub fn update_vao_instances<V: Clone>(
-        &mut self,
-        vao: &VAO,
-        instances: &[V],
-        usage_hint: VertexUsageHint,
-        // if `Some(count)`, each instance is repeated `count` times
-        repeat: Option<NonZeroUsize>,
-    ) {
-        debug_assert_eq!(self.bound_vao, vao.id);
-        debug_assert_eq!(vao.instance_stride as usize, mem::size_of::<V>());
-
-        match repeat {
-            Some(count) => {
-                let target = gl::ARRAY_BUFFER;
-                self.gl.bind_buffer(target, vao.instance_vbo_id.0);
-                let size = instances.len() * count.get() * mem::size_of::<V>();
-                self.gl.buffer_data_untyped(
-                    target,
-                    size as _,
-                    ptr::null(),
-                    usage_hint.to_gl(),
-                );
-
-                let ptr = match self.gl.get_type() {
-                    gl::GlType::Gl => {
-                        self.gl.map_buffer(target, gl::WRITE_ONLY)
-                    }
-                    gl::GlType::Gles => {
-                        self.gl.map_buffer_range(target, 0, size as _, gl::MAP_WRITE_BIT)
-                    }
-                };
-                assert!(!ptr.is_null());
-
-                let buffer_slice = unsafe {
-                    slice::from_raw_parts_mut(ptr as *mut V, instances.len() * count.get())
-                };
-                for (quad, instance) in buffer_slice.chunks_mut(4).zip(instances) {
-                    quad[0] = instance.clone();
-                    quad[1] = instance.clone();
-                    quad[2] = instance.clone();
-                    quad[3] = instance.clone();
-                }
-                self.gl.unmap_buffer(target);
+    pub fn initialize_mapped_vertex_buffer(
+        &mut self, buffer: VBOId, size: usize, usage_hint: VertexUsageHint
+    ) -> *mut c_void {
+        let target = gl::ARRAY_BUFFER;
+        self.gl.bind_buffer(target, buffer.0);
+        self.gl.buffer_data_untyped(
+            target,
+            size as _,
+            ptr::null(),
+            usage_hint.to_gl(),
+        );
+        match self.gl.get_type() {
+            gl::GlType::Gl => {
+                self.gl.map_buffer(target, gl::WRITE_ONLY)
             }
-            None => {
-                self.update_vbo_data(vao.instance_vbo_id, instances, usage_hint);
+            gl::GlType::Gles => {
+                self.gl.map_buffer_range(target, 0, size as _, gl::MAP_WRITE_BIT)
             }
         }
+    }
+
+    pub fn unmap_vertex_buffer(&mut self) {
+        self.gl.unmap_buffer(gl::ARRAY_BUFFER);
     }
 
     pub fn update_vao_indices<I>(&mut self, vao: &VAO, indices: &[I], usage_hint: VertexUsageHint) {
@@ -3443,7 +3440,7 @@ impl Device {
         );
     }
 
-    pub fn draw_triangles_u16(&mut self, first_vertex: i32, index_count: i32) {
+    pub fn draw_triangles_u16(&mut self, first_index: i32, index_count: i32) {
         debug_assert!(self.inside_frame);
         #[cfg(debug_assertions)]
         debug_assert!(self.shader_is_ready);
@@ -3452,11 +3449,11 @@ impl Device {
             gl::TRIANGLES,
             index_count,
             gl::UNSIGNED_SHORT,
-            first_vertex as u32 * 2,
+            first_index as u32 * 2,
         );
     }
 
-    pub fn draw_triangles_u32(&mut self, first_vertex: i32, index_count: i32) {
+    pub fn draw_triangles_u32(&mut self, first_index: i32, index_count: i32) {
         debug_assert!(self.inside_frame);
         #[cfg(debug_assertions)]
         debug_assert!(self.shader_is_ready);
@@ -3465,7 +3462,7 @@ impl Device {
             gl::TRIANGLES,
             index_count,
             gl::UNSIGNED_INT,
-            first_vertex as u32 * 4,
+            first_index as u32 * 4,
         );
     }
 
@@ -3483,19 +3480,6 @@ impl Device {
         debug_assert!(self.shader_is_ready);
 
         self.gl.draw_arrays(gl::LINES, first_vertex, vertex_count);
-    }
-
-    pub fn draw_indexed_triangles(&mut self, index_count: i32) {
-        debug_assert!(self.inside_frame);
-        #[cfg(debug_assertions)]
-        debug_assert!(self.shader_is_ready);
-
-        self.gl.draw_elements(
-            gl::TRIANGLES,
-            index_count,
-            gl::UNSIGNED_SHORT,
-            0,
-        );
     }
 
     pub fn draw_indexed_triangles_instanced_u16(&mut self, index_count: i32, instance_count: i32) {
